@@ -1,0 +1,28 @@
+MEME SNIPER V0.7.3 - CLEAN WINDOWS PACKAGE
+
+You only need to bring TWO files from the old working folder:
+
+1) .env
+2) memesniper.db  (Windows may display this simply as "memesniper")
+
+IMPORTANT:
+- Stop the old bot with Ctrl+C before copying memesniper.db.
+- Do not copy memesniper.db-wal or memesniper.db-shm after the old bot has stopped.
+- Do not rename .env.example. Copy your real .env.
+- Do not paste API keys into ChatGPT.
+
+Then:
+1) Put .env and memesniper.db beside START_MEME_SNIPER.bat.
+2) Double-click START_MEME_SNIPER.bat.
+3) First launch automatically creates the Python environment and installs dependencies.
+4) Open http://127.0.0.1:8000
+5) Keep the black window open while running locally.
+
+The Python environment is stored in:
+%LOCALAPPDATA%\MemeSniper\v073_venv
+
+This avoids the C:\Windows\System32 and OneDrive/Desktop access-denied problem.
+
+For 24/7 phone access, use the cloud deployment files after local V0.7.3 is confirmed working.
+
+REAL-MONEY EXECUTION REMAINS LOCKED IN THIS RELEASE.

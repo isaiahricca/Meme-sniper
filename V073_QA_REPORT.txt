@@ -1,0 +1,21 @@
+MEME SNIPER V0.7.3 QA REPORT
+
+Build target: V0.7.3 forward-test / cloud paper lab
+
+PASS - Python source compiles.
+PASS - 45 deterministic tests passed in the isolated QA run.
+PASS - FastAPI app imports and exposes expected routes.
+PASS - V0.7.3 conservative defaults validated: signal shadow mode, stricter wallet/copy gates, daily copy loss limit.
+PASS - Forward range never predates the original verified epoch.
+PASS - Local dashboard authentication remains opt-in; cloud instructions require authentication.
+PASS - Existing execution-lock tests pass.
+PASS - Static scan found no sendTransaction/private-key/seed-phrase implementation in app source.
+PASS - LIVE_TRADING_ENABLED remains false and no live signer is implemented.
+PASS - Update/full packages exclude .env, memesniper.db and cloud_seed database files.
+PASS - Cloud package uses a persistent /data database path and includes HTTPS-host guidance.
+
+NOTE
+The QA environment did not have the pinned aiosqlite package preinstalled and had no outbound package-install access. A minimal test-only import shim was used solely to let modules construct the SQLAlchemy engine without opening a database connection. The 45 tests exercised deterministic logic/import safety; no claim is made that this environment performed live provider API calls. The production package still pins and installs aiosqlite==0.21.0 from requirements.txt.
+
+PROFITABILITY
+This release intentionally makes no profit guarantee. It isolates the previously loss-making signal strategy from verified P/L, increases selectivity and adds cost-aware/circuit-breaker controls so the next 24/7 paper sample can answer whether the qualified smart-wallet strategy has positive forward expectancy.

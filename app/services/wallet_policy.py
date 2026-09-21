@@ -34,6 +34,15 @@ def eligible(profile: SmartWalletProfile, copy: WalletCopyabilityV06 | None, set
     if score < research_floor:
         return False
 
+    # Do not let ultra-high-frequency wallets monopolize the Helius queue. They
+    # are usually impossible to copy at our latency anyway, and forward
+    # copyability remains the final judge. Keep the research cutoff materially
+    # below the old 10k+/30d soft HFT threshold.
+    trades_30d = int(profile.total_trades_30d or 0)
+    research_hft_cap = min(int(settings.copyability_hft_trades_30d_soft), 5_000)
+    if trades_30d > research_hft_cap:
+        return False
+
     # Once enough forward evidence says AVOID, stop spending stream capacity on it.
     if copy is not None and copy.eligible_observations >= settings.copyability_min_observations:
         return copy.copyability_tier != "AVOID"

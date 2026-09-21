@@ -280,7 +280,25 @@ async def run_x_social(settings: Settings, stop: asyncio.Event) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.warning("X social cycle error: %s", str(exc)[:300])
+                message = str(exc)[:300]
+                log.warning("X social cycle error: %s", message)
+                try:
+                    async with SessionLocal() as session:
+                        state = await session.get(SystemState, "v074_x_social_status")
+                        payload = json.dumps({
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "status": "error",
+                            "error": message,
+                            "searches_last_hour": await _searches_last_hour(),
+                            "hourly_cap": settings.x_max_searches_per_hour,
+                        }, separators=(",", ":"))
+                        if state is None:
+                            session.add(SystemState(key="v074_x_social_status", value=payload))
+                        else:
+                            state.value = payload
+                        await session.commit()
+                except Exception:
+                    pass
 
             try:
                 await asyncio.wait_for(stop.wait(), timeout=max(settings.x_poll_seconds, 15.0))

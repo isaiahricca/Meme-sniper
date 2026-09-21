@@ -14,6 +14,7 @@ from app.services.signal_runtime_v06 import run_signal_runtime_v06
 from app.services.nansen import run_nansen
 from app.services.rug_shield import run_rug_shield
 from app.services.trader_intelligence import run_trader_intelligence
+from app.services.ai_ensemble import run_ai_ensemble
 from app.services.forward_test import ensure_forward_epoch
 
 log = logging.getLogger("supervisor")
@@ -31,7 +32,7 @@ class Supervisor:
         epoch = await ensure_v06_integrity_epoch(self.settings)
         log.info("Verified data epoch: %s", epoch.isoformat())
         forward = await ensure_forward_epoch(self.settings)
-        log.info("V0.7.3 forward-test epoch: %s", forward.isoformat())
+        log.info("V0.7.4 forward-test epoch: %s", forward.isoformat())
 
         runners = [
             run_pumpportal(self.settings, self.stop_event),
@@ -45,9 +46,10 @@ class Supervisor:
             run_signal_runtime_v06(self.settings, self.stop_event),
             run_nansen(self.settings, self.stop_event),
             run_trader_intelligence(self.settings, self.stop_event),
+            run_ai_ensemble(self.settings, self.stop_event),
         ]
         self.tasks = [asyncio.create_task(coro) for coro in runners]
-        log.info("Started %d V0.7.3 intelligence services", len(self.tasks))
+        log.info("Started %d V0.7.4 intelligence services", len(self.tasks))
 
     async def stop(self) -> None:
         self.stop_event.set()

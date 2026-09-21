@@ -29,6 +29,29 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+        # Lightweight forward migration for persistent SQLite deployments.
+        # create_all() creates new tables but does not add columns to an existing
+        # table, which matters because Railway keeps /data across deploys.
+        if settings.database_url.startswith("sqlite+aiosqlite"):
+            def _migrate_sqlite(sync_conn):
+                rows = sync_conn.exec_driver_sql(
+                    "PRAGMA table_info(ai_ensemble_decisions_v074)"
+                ).fetchall()
+                if not rows:
+                    return
+                existing = {row[1] for row in rows}
+                additions = [
+                    ("signal_age_seconds", "REAL"),
+                    ("trade_status_at_analysis", "VARCHAR(30)"),
+                    ("pre_entry", "BOOLEAN DEFAULT 1"),
+                ]
+                for name, ddl in additions:
+                    if name not in existing:
+                        sync_conn.exec_driver_sql(
+                            f"ALTER TABLE ai_ensemble_decisions_v074 ADD COLUMN {name} {ddl}"
+                        )
+            await conn.run_sync(_migrate_sqlite)
+
 
 async def get_session():
     async with SessionLocal() as session:

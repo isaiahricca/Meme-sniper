@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import json
 import time
 import base64
 import secrets
@@ -308,6 +309,11 @@ async def overview():
     shadow = await shadow_signal_summary(settings)
     circuit_open, circuit_pnl, _ = await copy_daily_circuit_open(settings)
     async with SessionLocal() as session:
+        gate_row = await session.get(SystemState, "v074_challenge_gate_stats")
+        try:
+            challenge_gate = json.loads(gate_row.value) if gate_row and gate_row.value else {}
+        except Exception:
+            challenge_gate = {}
         event_count = (await session.execute(select(func.count(Event.id)))).scalar_one()
         token_count = (await session.execute(select(func.count(Token.mint)))).scalar_one()
         enabled_wallets = (await session.execute(
@@ -345,6 +351,7 @@ async def overview():
         "open_verified_trades": forward["open_trades"],
         "forward_epoch": forward.get("forward_epoch"),
         "shadow_signal": shadow,
+        "challenge_gate": challenge_gate,
         "daily_loss_circuit_open": circuit_open,
         "daily_copy_pnl_usd": circuit_pnl,
         "invalid_trades": invalid_copy + invalid_signal,
@@ -483,8 +490,18 @@ async def paper_copy_trades(limit: int = 50):
 async def signal_trades(limit: int = 50):
     limit = min(max(limit, 1), 200)
     async with SessionLocal() as session:
+        stmt = select(SignalPaperTradeV06)
+        epoch_row = await session.get(SystemState, settings.forward_epoch_key)
+        if epoch_row is not None:
+            try:
+                epoch = datetime.fromisoformat(epoch_row.value)
+                if epoch.tzinfo is None:
+                    epoch = epoch.replace(tzinfo=timezone.utc)
+                stmt = stmt.where(SignalPaperTradeV06.signal_at >= epoch)
+            except Exception:
+                pass
         rows = list((await session.execute(
-            select(SignalPaperTradeV06).order_by(SignalPaperTradeV06.id.desc()).limit(limit)
+            stmt.order_by(SignalPaperTradeV06.id.desc()).limit(limit)
         )).scalars())
         return [{
             "id": r.id, "mint": r.token_mint, "status": r.status,
@@ -492,6 +509,7 @@ async def signal_trades(limit: int = 50):
             "reason": r.exit_reason, "entry": r.entry_fill_price, "exit": r.exit_fill_price,
             "pnl_usd": r.pnl_usd, "pnl_pct": r.pnl_pct,
             "mfe": r.max_favourable_pct, "mae": r.max_adverse_pct,
+            "notional_usd": r.notional_usd,
         } for r in rows]
 
 
@@ -714,7 +732,7 @@ DASHBOARD = r'''<!doctype html>
  <div class="chartbox"><canvas id="plChart"></canvas><div id="chartTip" class="tooltip"></div></div>
 </div>
 <div class="section"><h3>Verified paper-copy execution</h3><table><thead><tr><th>ID</th><th>Wallet</th><th>Token</th><th>Status</th><th>Integrity</th><th>Tier</th><th>Delay</th><th>Entry</th><th>Exit</th><th>P/L</th><th>MFE</th><th>MAE</th><th>Reason</th></tr></thead><tbody id="copyTrades"></tbody></table></div>
-<div class="section"><h3>Signal research trades <span class="warn">(SHADOW in V0.7.4)</span></h3><table><thead><tr><th>ID</th><th>Token</th><th>Status</th><th>Integrity</th><th>Score</th><th>Entry</th><th>Exit</th><th>P/L</th><th>MFE</th><th>MAE</th><th>Reason</th></tr></thead><tbody id="signalTrades"></tbody></table></div>
+<div class="section"><h3>Aggressive challenge trades <span class="warn">(CURRENT V0.7.4 EPOCH · PAPER ONLY)</span></h3><table><thead><tr><th>ID</th><th>Token</th><th>Status</th><th>Integrity</th><th>Score</th><th>Size</th><th>Entry</th><th>Exit</th><th>P/L</th><th>MFE</th><th>MAE</th><th>Reason</th></tr></thead><tbody id="signalTrades"></tbody></table></div>
 <div class="section"><h3>Wallet copyability</h3><div class="note">Medians from same-pair forward measurements. Extreme, late or pair-mismatched observations are excluded rather than averaged.</div><table><thead><tr><th>Wallet</th><th>Copy score</th><th>Tier</th><th>Obs</th><th>Excluded</th><th>Edge</th><th>HFT penalty</th><th>10s median</th><th>30s median</th><th>60s median</th><th>5m median</th><th>+10% hit</th><th>Lead</th></tr></thead><tbody id="copyability"></tbody></table></div>
 <div class="section"><h3>Smart-wallet leaderboard</h3><div class="note" id="birdeyeStatus"></div><table><thead><tr><th>Wallet</th><th>Policy</th><th>Tracked</th><th>Birdeye</th><th>Tier</th><th>30d win</th><th>30d realised</th><th>Trades</th><th>Seen</th><th>Copy</th><th>Copy tier</th></tr></thead><tbody id="wallets"></tbody></table></div>
 <div class="section"><h3>Verified wallet swaps</h3><table><thead><tr><th>Time</th><th>Wallet</th><th>Action</th><th>Token</th><th>Token Δ</th><th>Quote Δ</th><th>Copy eligible</th><th>Integrity</th></tr></thead><tbody id="swaps"></tbody></table></div>
@@ -752,9 +770,9 @@ async function refreshAll(){
  const [o,t,s,w,c,sw,pc,st,bs]=await Promise.all([
  fetch('/api/overview').then(r=>r.json()),fetch('/api/tokens?limit=18').then(r=>r.json()),fetch('/api/signals?limit=18').then(r=>r.json()),fetch('/api/smart-wallets?limit=25').then(r=>r.json()),fetch('/api/copyability?limit=25').then(r=>r.json()),fetch('/api/wallet-swaps?limit=25').then(r=>r.json()),fetch('/api/paper-copy-trades?limit=25').then(r=>r.json()),fetch('/api/signal-trades?limit=25').then(r=>r.json()),fetch('/api/birdeye-status').then(r=>r.json())]);
  document.getElementById('cards').innerHTML=[['Challenge equity P/L',money(o.shadow_signal.equity_pnl_usd)],['Realized',money(o.shadow_signal.pnl_usd)],['Open challenge',o.shadow_signal.open_trades],['Deployed',money(o.shadow_signal.open_notional_usd)],['Closed trades',o.shadow_signal.trades],['Challenge win',o.shadow_signal.win_rate_pct+'%'],['Challenge PF',o.shadow_signal.profit_factor??'—'],['Verified P/L',money(o.forward_pnl_usd)],['Wallets',o.tracked_wallets]].map(x=>`<div class="card"><div class="label">${x[0]}</div><div class="big">${x[1]}</div></div>`).join('');
- document.getElementById('integrityLine').textContent=`AGGRESSIVE PAPER CHALLENGE: ${o.shadow_signal.open_trades} open / ${o.shadow_signal.trades} closed · realized ${money(o.shadow_signal.pnl_usd)} · unrealized ${money(o.shadow_signal.unrealized_pnl_usd)} · equity P/L ${money(o.shadow_signal.equity_pnl_usd)} · PF ${o.shadow_signal.profit_factor??'—'}. VERIFIED lane separate · real-money execution OFF.`;
+ const g=o.challenge_gate||{}; document.getElementById('integrityLine').textContent=`AGGRESSIVE PAPER CHALLENGE: ${o.shadow_signal.open_trades} open / ${o.shadow_signal.trades} closed · realized ${money(o.shadow_signal.pnl_usd)} · unrealized ${money(o.shadow_signal.unrealized_pnl_usd)} · equity P/L ${money(o.shadow_signal.equity_pnl_usd)} · gates: ${g.market_eligible??0} market-ready, ${g.queued??0} queued, ${g.no_confirmation??0} no-confirm, ${g.score_below_entry??0} low-score, ${g.token_cooldown??0} cooldown · real-money OFF.`;
  document.getElementById('copyTrades').innerHTML=pc.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.wallet)}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.copy_tier||'—'}</td><td>${x.delay_s==null?'—':Number(x.delay_s).toFixed(1)+'s'}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
- document.getElementById('signalTrades').innerHTML=st.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.score}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
+ document.getElementById('signalTrades').innerHTML=st.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.score}</td><td>${money(x.notional_usd)}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('copyability').innerHTML=c.map(x=>`<tr><td class="mono">${short(x.wallet)}</td><td>${x.score}</td><td>${x.tier}</td><td>${x.observations}</td><td>${x.excluded}</td><td>${x.edge}</td><td>${x.hft_penalty}</td><td>${pct(x.r10)}</td><td>${pct(x.r30)}</td><td>${pct(x.r60)}</td><td>${pct(x.r300)}</td><td>${x.target_hit==null?'—':x.target_hit+'%'}</td><td>${x.lead==null?'—':x.lead+'s'}</td></tr>`).join('');
  document.getElementById('birdeyeStatus').textContent=bs.enabled?`Birdeye active · scans today ${bs.scans_today}/${bs.scan_limit} · estimated ${bs.estimated_cu_today} CU`:'Birdeye disabled';
  document.getElementById('wallets').innerHTML=w.map(x=>`<tr><td class="mono">${short(x.wallet)}</td><td>${x.policy_score??'—'}</td><td>${x.tracked?'YES':'NO'}</td><td>${x.birdeye_score}</td><td>${x.birdeye_tier}</td><td>${x.win_rate_pct==null?'—':x.win_rate_pct+'%'}</td><td>${money(x.realized_pnl_usd_30d)}</td><td>${x.total_trades_30d??'—'}</td><td>${x.seen}</td><td>${x.copy_score??'—'}</td><td>${x.copy_tier??'—'}</td></tr>`).join('');

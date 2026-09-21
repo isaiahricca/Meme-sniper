@@ -20,6 +20,7 @@ from app.models import (
     SystemState, TokenPairState, WalletSwapV06, WalletCopyabilityV06, WalletSwapMeasurementV06,
     PaperCopyTradeV06, SignalPaperTradeV06, SignalMeasurementV06,
     NansenSmartTradeV07, TraderIntelligenceV07, SmartMoneyClusterV07, TokenRiskV072,
+    AIEnsembleDecisionV074,
 )
 from app.services.supervisor import Supervisor
 from app.services.performance import build_performance, verified_epoch
@@ -48,7 +49,7 @@ async def lifespan(app: FastAPI):
     await supervisor.stop()
 
 
-app = FastAPI(title=f"{settings.brand_name} V0.7.4", version="0.7.3", lifespan=lifespan)
+app = FastAPI(title=f"{settings.brand_name} V0.7.4", version="0.7.4", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -513,6 +514,72 @@ async def signal_trades(limit: int = 50):
         } for r in rows]
 
 
+@app.get("/api/ai-ensemble")
+async def ai_ensemble(limit: int = 25):
+    limit = min(max(limit, 1), 100)
+    async with SessionLocal() as session:
+        rows = list((await session.execute(
+            select(AIEnsembleDecisionV074)
+            .order_by(AIEnsembleDecisionV074.created_at.desc())
+            .limit(limit)
+        )).scalars())
+        signal_ids = [x.signal_id for x in rows]
+        trades = {}
+        if signal_ids:
+            trade_rows = list((await session.execute(
+                select(SignalPaperTradeV06)
+                .where(SignalPaperTradeV06.signal_id.in_(signal_ids))
+                .order_by(SignalPaperTradeV06.id.desc())
+            )).scalars())
+            for t in trade_rows:
+                trades.setdefault(t.signal_id, t)
+
+        total = (await session.execute(select(func.count(AIEnsembleDecisionV074.signal_id)))).scalar_one()
+        pre_entry = (await session.execute(
+            select(func.count(AIEnsembleDecisionV074.signal_id))
+            .where(AIEnsembleDecisionV074.pre_entry.is_(True))
+        )).scalar_one()
+        both_ok = (await session.execute(
+            select(func.count(AIEnsembleDecisionV074.signal_id))
+            .where(
+                AIEnsembleDecisionV074.openai_status == "ok",
+                AIEnsembleDecisionV074.claude_status == "ok",
+            )
+        )).scalar_one()
+
+        return {
+            "enabled": settings.ai_ensemble_enabled,
+            "openai_configured": bool(settings.openai_api_key),
+            "claude_configured": bool(settings.anthropic_api_key),
+            "openai_model": settings.openai_model,
+            "claude_model": settings.anthropic_model,
+            "total_decisions": int(total or 0),
+            "pre_entry_decisions": int(pre_entry or 0),
+            "both_models_ok": int(both_ok or 0),
+            "hourly_cap": settings.ai_max_analyses_per_hour,
+            "rows": [{
+                "signal_id": r.signal_id,
+                "ts": r.created_at.isoformat() if r.created_at else None,
+                "mint": r.token_mint,
+                "pre_entry": r.pre_entry,
+                "signal_age_s": r.signal_age_seconds,
+                "openai_status": r.openai_status,
+                "openai_verdict": r.openai_verdict,
+                "openai_confidence": r.openai_confidence,
+                "openai_edge": r.openai_expected_edge_pct,
+                "claude_status": r.claude_status,
+                "claude_verdict": r.claude_verdict,
+                "claude_confidence": r.claude_confidence,
+                "claude_edge": r.claude_expected_edge_pct,
+                "consensus": r.consensus,
+                "consensus_confidence": r.consensus_confidence,
+                "trade_status": trades[r.signal_id].status if r.signal_id in trades else None,
+                "trade_pnl_pct": trades[r.signal_id].pnl_pct if r.signal_id in trades else None,
+                "trade_reason": trades[r.signal_id].exit_reason if r.signal_id in trades else None,
+            } for r in rows],
+        }
+
+
 @app.get("/api/birdeye-status")
 async def birdeye_status():
     async with SessionLocal() as session:
@@ -725,7 +792,8 @@ DASHBOARD = r'''<!doctype html>
 </style></head><body><div class="wrap">
 <div class="toolbar"><div><h1>Meme Sniper V0.7.4</h1></div><div class="buttons"><a href="/tokens" style="text-decoration:none"><button type="button">Token Explorer</button></a><a href="/command" style="text-decoration:none"><button type="button">Command Centre</button></a><a href="/traders" style="text-decoration:none"><button type="button">Top Traders</button></a></div></div><div class="sub"><span class="verified">● PAPER ONLY</span> · V0.7.4 AGGRESSIVE CHALLENGE · smart-wallet + cluster-confirmed signal lane · real-money execution physically disabled</div>
 <div class="grid" id="cards"></div>
-<div class="note" id="integrityLine" style="margin:-8px 0 12px 2px"></div>
+<div class="note" id="integrityLine" style="margin:-8px 0 6px 2px"></div>
+<div class="note" id="aiStatusLine" style="margin:0 0 12px 2px"></div>
 <div class="card">
  <div class="toolbar"><div><b>Verified lane cumulative P/L</b><div class="note">Verified results remain deliberately separate from the aggressive paper challenge. Historical data is preserved under All.</div></div>
  <div><div class="buttons" id="strategyButtons"><button data-v="all" class="active">Overall</button><button data-v="copy">Smart wallet</button><button data-v="signal">Signals</button></div><div class="buttons" id="rangeButtons" style="margin-top:5px"><button data-v="forward" class="active">V0.7.4</button><button data-v="1h">1H</button><button data-v="today">Today</button><button data-v="7d">7D</button><button data-v="30d">30D</button><button data-v="all">All</button></div></div></div>
@@ -733,6 +801,7 @@ DASHBOARD = r'''<!doctype html>
 </div>
 <div class="section"><h3>Verified paper-copy execution</h3><table><thead><tr><th>ID</th><th>Wallet</th><th>Token</th><th>Status</th><th>Integrity</th><th>Tier</th><th>Delay</th><th>Entry</th><th>Exit</th><th>P/L</th><th>MFE</th><th>MAE</th><th>Reason</th></tr></thead><tbody id="copyTrades"></tbody></table></div>
 <div class="section"><h3>Aggressive challenge trades <span class="warn">(CURRENT V0.7.4 EPOCH · PAPER ONLY)</span></h3><table><thead><tr><th>ID</th><th>Token</th><th>Status</th><th>Integrity</th><th>Score</th><th>Size</th><th>Entry</th><th>Exit</th><th>P/L</th><th>MFE</th><th>MAE</th><th>Reason</th></tr></thead><tbody id="signalTrades"></tbody></table></div>
+<div class="section"><h3>AI committee <span class="warn">(OpenAI + Claude · SHADOW ONLY)</span></h3><div class="note">Both models independently receive the same market packet. Their decisions are logged for forward calibration and do not control trades yet.</div><table><thead><tr><th>Signal</th><th>Token</th><th>Pre-entry</th><th>OpenAI</th><th>Conf.</th><th>Edge</th><th>Claude</th><th>Conf.</th><th>Edge</th><th>Consensus</th><th>Actual P/L</th><th>Exit</th></tr></thead><tbody id="aiDecisions"></tbody></table></div>
 <div class="section"><h3>Wallet copyability</h3><div class="note">Medians from same-pair forward measurements. Extreme, late or pair-mismatched observations are excluded rather than averaged.</div><table><thead><tr><th>Wallet</th><th>Copy score</th><th>Tier</th><th>Obs</th><th>Excluded</th><th>Edge</th><th>HFT penalty</th><th>10s median</th><th>30s median</th><th>60s median</th><th>5m median</th><th>+10% hit</th><th>Lead</th></tr></thead><tbody id="copyability"></tbody></table></div>
 <div class="section"><h3>Smart-wallet leaderboard</h3><div class="note" id="birdeyeStatus"></div><table><thead><tr><th>Wallet</th><th>Policy</th><th>Tracked</th><th>Birdeye</th><th>Tier</th><th>30d win</th><th>30d realised</th><th>Trades</th><th>Seen</th><th>Copy</th><th>Copy tier</th></tr></thead><tbody id="wallets"></tbody></table></div>
 <div class="section"><h3>Verified wallet swaps</h3><table><thead><tr><th>Time</th><th>Wallet</th><th>Action</th><th>Token</th><th>Token Δ</th><th>Quote Δ</th><th>Copy eligible</th><th>Integrity</th></tr></thead><tbody id="swaps"></tbody></table></div>
@@ -767,12 +836,14 @@ canvas.addEventListener('mousemove',e=>{if(!chartData.length||!canvas._geom)retu
 
 async function refreshPerformance(){const p=await fetch(`/api/performance?strategy=${strategy}&range=${range}`).then(r=>r.json());chartData=p.curve||[];drawChart();}
 async function refreshAll(){
- const [o,t,s,w,c,sw,pc,st,bs]=await Promise.all([
- fetch('/api/overview').then(r=>r.json()),fetch('/api/tokens?limit=18').then(r=>r.json()),fetch('/api/signals?limit=18').then(r=>r.json()),fetch('/api/smart-wallets?limit=25').then(r=>r.json()),fetch('/api/copyability?limit=25').then(r=>r.json()),fetch('/api/wallet-swaps?limit=25').then(r=>r.json()),fetch('/api/paper-copy-trades?limit=25').then(r=>r.json()),fetch('/api/signal-trades?limit=25').then(r=>r.json()),fetch('/api/birdeye-status').then(r=>r.json())]);
+ const [o,t,s,w,c,sw,pc,st,bs,ai]=await Promise.all([
+ fetch('/api/overview').then(r=>r.json()),fetch('/api/tokens?limit=18').then(r=>r.json()),fetch('/api/signals?limit=18').then(r=>r.json()),fetch('/api/smart-wallets?limit=25').then(r=>r.json()),fetch('/api/copyability?limit=25').then(r=>r.json()),fetch('/api/wallet-swaps?limit=25').then(r=>r.json()),fetch('/api/paper-copy-trades?limit=25').then(r=>r.json()),fetch('/api/signal-trades?limit=25').then(r=>r.json()),fetch('/api/birdeye-status').then(r=>r.json()),fetch('/api/ai-ensemble?limit=25').then(r=>r.json())]);
  document.getElementById('cards').innerHTML=[['Challenge equity P/L',money(o.shadow_signal.equity_pnl_usd)],['Realized',money(o.shadow_signal.pnl_usd)],['Open challenge',o.shadow_signal.open_trades],['Deployed',money(o.shadow_signal.open_notional_usd)],['Closed trades',o.shadow_signal.trades],['Challenge win',o.shadow_signal.win_rate_pct+'%'],['Challenge PF',o.shadow_signal.profit_factor??'—'],['Verified P/L',money(o.forward_pnl_usd)],['Wallets',o.tracked_wallets]].map(x=>`<div class="card"><div class="label">${x[0]}</div><div class="big">${x[1]}</div></div>`).join('');
  const g=o.challenge_gate||{}; document.getElementById('integrityLine').textContent=`AGGRESSIVE PAPER CHALLENGE: ${o.shadow_signal.open_trades} open / ${o.shadow_signal.trades} closed · realized ${money(o.shadow_signal.pnl_usd)} · unrealized ${money(o.shadow_signal.unrealized_pnl_usd)} · equity P/L ${money(o.shadow_signal.equity_pnl_usd)} · gates: ${g.market_eligible??0} market-ready, ${g.queued??0} queued, ${g.no_confirmation??0} no-confirm, ${g.score_below_entry??0} low-score, ${g.token_cooldown??0} cooldown · real-money OFF.`;
+ const aiReady=(ai.openai_configured?'OpenAI '+ai.openai_model:'OpenAI NEEDS KEY')+' · '+(ai.claude_configured?'Claude '+ai.claude_model:'Claude NEEDS KEY'); document.getElementById('aiStatusLine').textContent=`AI COMMITTEE: ${aiReady} · ${ai.total_decisions} decisions · ${ai.pre_entry_decisions} pre-entry · ${ai.both_models_ok} dual-model responses · shadow only.`;
  document.getElementById('copyTrades').innerHTML=pc.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.wallet)}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.copy_tier||'—'}</td><td>${x.delay_s==null?'—':Number(x.delay_s).toFixed(1)+'s'}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('signalTrades').innerHTML=st.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.score}</td><td>${money(x.notional_usd)}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
+ document.getElementById('aiDecisions').innerHTML=(ai.rows||[]).map(x=>`<tr><td>${x.signal_id}</td><td class="mono">${short(x.mint)}</td><td>${x.pre_entry?'YES':'NO'}</td><td>${x.openai_status==='ok'?(x.openai_verdict||'—'):x.openai_status}</td><td>${x.openai_confidence==null?'—':Number(x.openai_confidence).toFixed(0)+'%'}</td><td>${x.openai_edge==null?'—':pct(x.openai_edge)}</td><td>${x.claude_status==='ok'?(x.claude_verdict||'—'):x.claude_status}</td><td>${x.claude_confidence==null?'—':Number(x.claude_confidence).toFixed(0)+'%'}</td><td>${x.claude_edge==null?'—':pct(x.claude_edge)}</td><td>${x.consensus||'—'}</td><td class="${(x.trade_pnl_pct||0)>=0?'good':'bad'}">${x.trade_pnl_pct==null?'—':pct(x.trade_pnl_pct)}</td><td>${x.trade_reason||x.trade_status||'—'}</td></tr>`).join('');
  document.getElementById('copyability').innerHTML=c.map(x=>`<tr><td class="mono">${short(x.wallet)}</td><td>${x.score}</td><td>${x.tier}</td><td>${x.observations}</td><td>${x.excluded}</td><td>${x.edge}</td><td>${x.hft_penalty}</td><td>${pct(x.r10)}</td><td>${pct(x.r30)}</td><td>${pct(x.r60)}</td><td>${pct(x.r300)}</td><td>${x.target_hit==null?'—':x.target_hit+'%'}</td><td>${x.lead==null?'—':x.lead+'s'}</td></tr>`).join('');
  document.getElementById('birdeyeStatus').textContent=bs.enabled?`Birdeye active · scans today ${bs.scans_today}/${bs.scan_limit} · estimated ${bs.estimated_cu_today} CU`:'Birdeye disabled';
  document.getElementById('wallets').innerHTML=w.map(x=>`<tr><td class="mono">${short(x.wallet)}</td><td>${x.policy_score??'—'}</td><td>${x.tracked?'YES':'NO'}</td><td>${x.birdeye_score}</td><td>${x.birdeye_tier}</td><td>${x.win_rate_pct==null?'—':x.win_rate_pct+'%'}</td><td>${money(x.realized_pnl_usd_30d)}</td><td>${x.total_trades_30d??'—'}</td><td>${x.seen}</td><td>${x.copy_score??'—'}</td><td>${x.copy_tier??'—'}</td></tr>`).join('');

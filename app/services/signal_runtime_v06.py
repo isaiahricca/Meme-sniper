@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -8,7 +9,7 @@ from app.config import Settings
 from app.db import SessionLocal
 from app.models import (
     Token, Signal, WalletSwapV06, TokenPairState, PairLatestPrice,
-    SignalMeasurementV06, SignalPaperTradeV06, SmartMoneyClusterV07,
+    SignalMeasurementV06, SignalPaperTradeV06, SmartMoneyClusterV07, SystemState,
 )
 from app.services.signal_engine import SignalInputs, score_signal
 from app.services.paper import simulate_buy, simulate_sell
@@ -118,41 +119,68 @@ async def _active_count(session) -> int:
 async def _queue_trade(
     session, token: Token, signal: Signal | None, scored, settings: Settings,
     smart_wallet_buys: int = 0, cluster_score: float | None = None,
-) -> bool:
-    # V0.7.4 aggressive PAPER challenge. Entries still require on-chain smart-money
-    # confirmation, but we no longer wait for an 88/100 raw signal that almost never fires.
+) -> tuple[bool, str, float]:
+    # V0.7.4 PAPER challenge. The strict verified-copy lane is separate.
     effective_entry = max(float(settings.paper_entry_score), 60.0)
-    cluster_bonus = 0.0 if cluster_score is None else max(0.0, min(12.0, (float(cluster_score) - 55.0) * 0.30))
+    cluster_bonus = 0.0 if cluster_score is None else max(
+        0.0, min(12.0, (float(cluster_score) - 55.0) * 0.30)
+    )
     wallet_bonus = min(max(int(smart_wallet_buys), 0), 4) * 2.5
     challenge_score = min(100.0, float(scored.total_score) + cluster_bonus + wallet_bonus)
 
-    # Accept either explicit smart-money confirmation OR a strong independent
-    # market tape. This keeps the lane selective but prevents the 32-wallet
-    # tracked universe from freezing all paper activity.
-    smart_confirmed = smart_wallet_buys >= 1 or (cluster_score is not None and float(cluster_score) >= 60.0)
+    smart_confirmed = smart_wallet_buys >= 1 or (
+        cluster_score is not None and float(cluster_score) >= 60.0
+    )
     market_confirmed = (
         float(scored.flow_score) >= 60.0
         and float(scored.momentum_score) >= 52.0
         and float(scored.liquidity_score) >= 8.0
     )
-    if signal is None or not (smart_confirmed or market_confirmed) or challenge_score < effective_entry:
-        return False
-    existing = (
+    if signal is None:
+        return False, "no_signal_record", challenge_score
+    if not (smart_confirmed or market_confirmed):
+        return False, "no_confirmation", challenge_score
+    if challenge_score < effective_entry:
+        return False, "score_below_entry", challenge_score
+
+    now = datetime.now(timezone.utc)
+    cooldown_start = now - timedelta(seconds=max(int(settings.paper_signal_reentry_cooldown_seconds), 0))
+    recent = (
         await session.execute(
             select(SignalPaperTradeV06.id)
             .where(
                 SignalPaperTradeV06.token_mint == token.mint,
-                SignalPaperTradeV06.status.in_(["pending", "open"]),
-            ).limit(1)
+                SignalPaperTradeV06.signal_at >= cooldown_start,
+            )
+            .order_by(SignalPaperTradeV06.signal_at.desc())
+            .limit(1)
         )
     ).scalar_one_or_none()
-    if existing or await _active_count(session) >= settings.paper_max_open_positions:
-        return False
+    if recent:
+        return False, "token_cooldown", challenge_score
+    if await _active_count(session) >= settings.paper_max_open_positions:
+        return False, "max_open", challenge_score
+
     pair = await _fresh_pair(session, token.mint, settings)
     if pair is None:
-        return False
-    state, _ = pair
-    signal_at = aware(signal.ts) or datetime.now(timezone.utc)
+        return False, "no_fresh_exact_pair", challenge_score
+    state, latest = pair
+    if latest.liquidity_usd is None or latest.liquidity_usd < settings.min_liquidity_usd:
+        return False, "liquidity_below_min", challenge_score
+
+    # Size by verified pair liquidity so a $1k headline position is only used
+    # where the pool can plausibly absorb it. This is still paper-only.
+    safe_notional = float(latest.liquidity_usd) * max(
+        0.0001, float(settings.paper_position_liquidity_fraction)
+    )
+    if safe_notional < float(settings.paper_position_min_usd):
+        return False, "liquidity_too_shallow_for_min_size", challenge_score
+    notional = min(float(settings.paper_position_usd), safe_notional)
+
+    # The entry clock starts when THIS cycle makes the decision, not when an old
+    # signal row happened to be written. Reusing signal.ts caused silent expired
+    # entry windows after restarts / unchanged scores.
+    signal_at = now
     eligible = signal_at + timedelta(milliseconds=settings.paper_latency_ms)
     session.add(SignalPaperTradeV06(
         signal_id=signal.id,
@@ -163,17 +191,31 @@ async def _queue_trade(
         entry_deadline_at=eligible + timedelta(seconds=settings.paper_signal_entry_deadline_seconds),
         status="pending",
         integrity_status="shadow_pending" if settings.paper_signal_shadow_mode else "pending",
-        notional_usd=settings.paper_position_usd,
+        notional_usd=notional,
         fees_usd=0.0,
         entry_score=challenge_score,
         max_favourable_pct=0.0,
         max_adverse_pct=0.0,
     ))
-    return True
+    return True, "queued", challenge_score
 
 
-async def evaluate_signals(settings: Settings) -> int:
-    recorded = 0
+async def evaluate_signals(settings: Settings) -> dict:
+    stats = {
+        "evaluated": 0,
+        "market_eligible": 0,
+        "recorded": 0,
+        "queued": 0,
+        "below_market_liquidity": 0,
+        "no_confirmation": 0,
+        "score_below_entry": 0,
+        "token_cooldown": 0,
+        "max_open": 0,
+        "no_fresh_exact_pair": 0,
+        "liquidity_below_min": 0,
+        "liquidity_too_shallow_for_min_size": 0,
+        "no_signal_record": 0,
+    }
     async with SessionLocal() as session:
         tokens = list((await session.execute(
             select(Token).order_by(Token.discovered_at.desc()).limit(120)
@@ -188,9 +230,18 @@ async def evaluate_signals(settings: Settings) -> int:
         cluster_by_mint = {}
         for cluster in clusters:
             cluster_by_mint.setdefault(cluster.token_mint, cluster)
+
         for token in tokens:
-            if not token.price_usd or not token.liquidity_usd or token.liquidity_usd < settings.min_liquidity_usd:
+            stats["evaluated"] += 1
+            if (
+                not token.price_usd
+                or not token.liquidity_usd
+                or token.liquidity_usd < settings.min_liquidity_usd
+            ):
+                stats["below_market_liquidity"] += 1
                 continue
+            stats["market_eligible"] += 1
+
             buys, sells = await _wallet_flow(session, token.mint)
             scored = score_signal(
                 SignalInputs(
@@ -205,16 +256,41 @@ async def evaluate_signals(settings: Settings) -> int:
             )
             sig = await _record_signal_if_changed(session, token, scored, settings)
             if sig is not None:
-                recorded += 1
-                cluster = cluster_by_mint.get(token.mint)
-                cluster_score = float(cluster.cluster_score) if cluster is not None else None
-                await _queue_trade(
-                    session, token, sig, scored, settings,
-                    smart_wallet_buys=buys, cluster_score=cluster_score,
-                )
-        await session.commit()
-    return recorded
+                stats["recorded"] += 1
+            else:
+                # Trading eligibility is evaluated every cycle. A signal not
+                # changing by 2 points must not freeze the execution engine.
+                sig = (
+                    await session.execute(
+                        select(Signal)
+                        .where(Signal.token_mint == token.mint)
+                        .order_by(Signal.ts.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
 
+            cluster = cluster_by_mint.get(token.mint)
+            cluster_score = float(cluster.cluster_score) if cluster is not None else None
+            queued, reason, _challenge_score = await _queue_trade(
+                session, token, sig, scored, settings,
+                smart_wallet_buys=buys, cluster_score=cluster_score,
+            )
+            if queued:
+                stats["queued"] += 1
+            elif reason in stats:
+                stats[reason] += 1
+
+        row = await session.get(SystemState, "v074_challenge_gate_stats")
+        payload = json.dumps({
+            **stats,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }, separators=(",", ":"))
+        if row is None:
+            session.add(SystemState(key="v074_challenge_gate_stats", value=payload))
+        else:
+            row.value = payload
+        await session.commit()
+    return stats
 
 async def _enter_pending(settings: Settings) -> tuple[int, int]:
     now = datetime.now(timezone.utc)
@@ -385,14 +461,16 @@ async def run_signal_runtime_v06(settings: Settings, stop: asyncio.Event) -> Non
     )
     while not stop.is_set():
         try:
-            recorded = await evaluate_signals(settings)
+            gate = await evaluate_signals(settings)
             entered, rejected = await _enter_pending(settings)
             closed, bad_trades = await _manage_open(settings)
             captures, bad_measurements = await _capture_measurements(settings)
-            if any([recorded, entered, rejected, closed, bad_trades, captures, bad_measurements]):
+            if any([gate["recorded"], gate["queued"], entered, rejected, closed, bad_trades, captures, bad_measurements]):
                 log.info(
-                    "Signal cycle signals=%d enter=%d reject=%d close=%d trade_invalid=%d measured=%d measure_invalid=%d",
-                    recorded, entered, rejected, closed, bad_trades, captures, bad_measurements,
+                    "Signal cycle signals=%d queued=%d enter=%d reject=%d close=%d invalid=%d measured=%d measure_invalid=%d gates=%s",
+                    gate["recorded"], gate["queued"], entered, rejected, closed, bad_trades,
+                    captures, bad_measurements,
+                    {k: v for k, v in gate.items() if v and k not in {"recorded", "queued"}},
                 )
         except asyncio.CancelledError:
             raise

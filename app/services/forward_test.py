@@ -106,9 +106,32 @@ async def copy_daily_circuit_open(settings: Settings) -> tuple[bool, float, date
     return pnl <= -abs(settings.paper_copy_daily_loss_limit_usd), pnl, start
 
 
-async def shadow_signal_summary(settings: Settings) -> dict:
-    """Return V0.7.3 signal shadow results without mixing them into verified P/L."""
-    epoch = await forward_epoch(settings)
+async def ensure_named_epoch(key: str) -> datetime:
+    now = datetime.now(timezone.utc)
+    async with SessionLocal() as session:
+        row = await session.get(SystemState, key)
+        if row is not None:
+            try:
+                return aware(datetime.fromisoformat(row.value)) or now
+            except Exception:
+                return now
+        session.add(SystemState(key=key, value=now.isoformat()))
+        await session.commit()
+        return now
+
+
+async def named_epoch(key: str) -> datetime | None:
+    async with SessionLocal() as session:
+        row = await session.get(SystemState, key)
+        if row is None:
+            return None
+        try:
+            return aware(datetime.fromisoformat(row.value))
+        except Exception:
+            return None
+
+
+async def shadow_signal_summary_since(settings: Settings, epoch: datetime | None) -> dict:
     if epoch is None:
         return {
             "trades": 0, "wins": 0, "pnl_usd": 0.0, "profit_factor": None,
@@ -164,3 +187,13 @@ async def shadow_signal_summary(settings: Settings) -> dict:
         "unrealized_pnl_usd": round(unrealized, 4),
         "equity_pnl_usd": round(sum(pnls) + unrealized, 4),
     }
+
+
+async def shadow_signal_summary(settings: Settings) -> dict:
+    """Return challenge results from the main forward epoch."""
+    return await shadow_signal_summary_since(settings, await forward_epoch(settings))
+
+
+async def ai_x_regime_summary(settings: Settings) -> dict:
+    """Return results from the dual-AI + X regime without hiding legacy losses."""
+    return await shadow_signal_summary_since(settings, await named_epoch("v074_ai_x_regime_epoch"))

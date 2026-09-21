@@ -204,6 +204,21 @@ class Settings(BaseSettings):
     forward_epoch_key: str = "v073_paper_epoch"
 
     # This remains physically ignored/blocked in V0.6.
+    # --------------------
+    # Dual-model AI ensemble (research/shadow only)
+    # --------------------
+    ai_ensemble_enabled: bool = True
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    openai_model: str = "gpt-5.6-terra"
+    anthropic_model: str = "claude-sonnet-5"
+    ai_candidate_min_score: float = 58.0
+    ai_poll_seconds: float = 8.0
+    ai_max_candidates_per_cycle: int = 2
+    ai_max_analyses_per_hour: int = 20
+    ai_request_timeout_seconds: float = 25.0
+    ai_max_output_tokens: int = 700
+
     live_trading_enabled: bool = False
 
     @property

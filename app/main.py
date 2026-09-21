@@ -24,7 +24,7 @@ from app.models import (
 )
 from app.services.supervisor import Supervisor
 from app.services.performance import build_performance, verified_epoch
-from app.services.forward_test import shadow_signal_summary, copy_daily_circuit_open
+from app.services.forward_test import shadow_signal_summary, ai_x_regime_summary, copy_daily_circuit_open
 from app.services.command_center import status as command_status, traders as command_traders, clusters as command_clusters, opportunities as command_opportunities, live_feed as command_live_feed
 from app.pages_v07 import COMMAND_PAGE, TRADERS_PAGE, INTEGRATIONS_PAGE
 
@@ -308,6 +308,7 @@ async def overview():
     forward = await build_performance("all", "forward")
     today = await build_performance("all", "today")
     shadow = await shadow_signal_summary(settings)
+    ai_regime = await ai_x_regime_summary(settings)
     circuit_open, circuit_pnl, _ = await copy_daily_circuit_open(settings)
     async with SessionLocal() as session:
         gate_row = await session.get(SystemState, "v074_challenge_gate_stats")
@@ -352,6 +353,7 @@ async def overview():
         "open_verified_trades": forward["open_trades"],
         "forward_epoch": forward.get("forward_epoch"),
         "shadow_signal": shadow,
+        "ai_x_regime": ai_regime,
         "challenge_gate": challenge_gate,
         "daily_loss_circuit_open": circuit_open,
         "daily_copy_pnl_usd": circuit_pnl,
@@ -998,8 +1000,8 @@ async function refreshPerformance(){const p=await fetch(`/api/performance?strate
 async function refreshAll(){
  const [o,t,s,w,c,sw,pc,st,bs,ai,xs]=await Promise.all([
  fetch('/api/overview').then(r=>r.json()),fetch('/api/tokens?limit=18').then(r=>r.json()),fetch('/api/signals?limit=18').then(r=>r.json()),fetch('/api/smart-wallets?limit=25').then(r=>r.json()),fetch('/api/copyability?limit=25').then(r=>r.json()),fetch('/api/wallet-swaps?limit=25').then(r=>r.json()),fetch('/api/paper-copy-trades?limit=25').then(r=>r.json()),fetch('/api/signal-trades?limit=25').then(r=>r.json()),fetch('/api/birdeye-status').then(r=>r.json()),fetch('/api/ai-ensemble?limit=25').then(r=>r.json()),fetch('/api/x-social-status').then(r=>r.json())]);
- document.getElementById('cards').innerHTML=[['Challenge equity P/L',money(o.shadow_signal.equity_pnl_usd)],['Realized',money(o.shadow_signal.pnl_usd)],['Open challenge',o.shadow_signal.open_trades],['Deployed',money(o.shadow_signal.open_notional_usd)],['Closed trades',o.shadow_signal.trades],['Challenge win',o.shadow_signal.win_rate_pct+'%'],['Challenge PF',o.shadow_signal.profit_factor??'—'],['Verified P/L',money(o.forward_pnl_usd)],['Wallets',o.tracked_wallets]].map(x=>`<div class="card"><div class="label">${x[0]}</div><div class="big">${x[1]}</div></div>`).join('');
- const g=o.challenge_gate||{}; document.getElementById('integrityLine').textContent=`AGGRESSIVE PAPER CHALLENGE: ${o.shadow_signal.open_trades} open / ${o.shadow_signal.trades} closed · realized ${money(o.shadow_signal.pnl_usd)} · unrealized ${money(o.shadow_signal.unrealized_pnl_usd)} · equity P/L ${money(o.shadow_signal.equity_pnl_usd)} · gates: ${g.market_eligible??0} market-ready, ${g.queued??0} queued, ${g.no_confirmation??0} no-confirm, ${g.score_below_entry??0} low-score, ${g.token_cooldown??0} cooldown · real-money OFF.`;
+ document.getElementById('cards').innerHTML=[['AI+X regime P/L',money(o.ai_x_regime.equity_pnl_usd)],['AI+X realized',money(o.ai_x_regime.pnl_usd)],['AI+X trades',o.ai_x_regime.trades],['AI+X win',o.ai_x_regime.win_rate_pct+'%'],['AI+X PF',o.ai_x_regime.profit_factor??'—'],['Open challenge',o.shadow_signal.open_trades],['Legacy challenge P/L',money(o.shadow_signal.equity_pnl_usd)],['Verified P/L',money(o.forward_pnl_usd)],['Wallets',o.tracked_wallets]].map(x=>`<div class="card"><div class="label">${x[0]}</div><div class="big">${x[1]}</div></div>`).join('');
+ const g=o.challenge_gate||{}; document.getElementById('integrityLine').textContent=`AI+X REGIME: ${o.ai_x_regime.open_trades} open / ${o.ai_x_regime.trades} closed · equity ${money(o.ai_x_regime.equity_pnl_usd)} · PF ${o.ai_x_regime.profit_factor??'—'} · LEGACY challenge ${money(o.shadow_signal.equity_pnl_usd)} · gates: ${g.market_eligible??0} market-ready, ${g.ai_pending??0} AI-pending, ${g.ai_reject??0} AI-reject, ${g.ai_edge_below_cost??0} edge<cost · real-money OFF.`;
  const aiReady=(ai.openai_configured?'OpenAI '+ai.openai_model:'OpenAI NEEDS KEY')+' · '+(ai.claude_configured?'Claude '+ai.claude_model:'Claude NEEDS KEY');const xReady=!xs.configured?'X SOCIAL NEEDS BEARER TOKEN':(xs.runtime_status==='error'?'X SOCIAL ERROR: '+(xs.runtime_error||'check API credits'):'X SOCIAL ACTIVE'); document.getElementById('aiStatusLine').textContent=`AI COMMITTEE: ${aiReady} · ${ai.total_decisions} decisions · ${ai.both_models_ok} dual-model responses · AI ENTRY GATE ${ai.ai_trade_gate?'ON':'OFF'} · ${xReady} · ${xs.covered_tokens||0} tokens enriched.`;
  document.getElementById('copyTrades').innerHTML=pc.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.wallet)}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.copy_tier||'—'}</td><td>${x.delay_s==null?'—':Number(x.delay_s).toFixed(1)+'s'}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('signalTrades').innerHTML=st.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.score}</td><td>${money(x.notional_usd)}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');

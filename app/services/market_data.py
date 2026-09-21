@@ -220,10 +220,20 @@ async def _critical_pairs_and_missing(settings: Settings) -> tuple[list[str], li
 
 async def _broad_pairs_and_missing(settings: Settings) -> tuple[list[str], list[str]]:
     async with SessionLocal() as session:
+        # Refresh the existing pinned universe as well as newly discovered tokens.
+        # Previously we only refreshed the newest PumpPortal rows, so older liquid
+        # migrated coins quietly fell out of the challenge scanner.
+        active_states = list((await session.execute(
+            select(TokenPairState)
+            .where(TokenPairState.status == "active")
+            .order_by(TokenPairState.last_verified_at.desc())
+            .limit(settings.market_max_active_pairs)
+        )).scalars())
+        pairs: list[str] = [s.pair_address for s in active_states if s.pair_address]
+
         tokens = list((await session.execute(
             select(Token).order_by(Token.discovered_at.desc()).limit(settings.market_recent_token_limit)
         )).scalars())
-        pairs: list[str] = []
         missing: list[str] = []
         for token in tokens:
             state = await session.get(TokenPairState, token.mint)
@@ -231,7 +241,7 @@ async def _broad_pairs_and_missing(settings: Settings) -> tuple[list[str], list[
                 pairs.append(state.pair_address)
             elif state is None or state.status in {"needs_repin", "invalid"}:
                 missing.append(token.mint)
-        return list(dict.fromkeys(pairs)), list(dict.fromkeys(missing))[:20]
+        return list(dict.fromkeys(pairs))[:settings.market_max_active_pairs], list(dict.fromkeys(missing))[:40]
 
 
 async def _discover_missing(client: httpx.AsyncClient, settings: Settings, mints: list[str]) -> int:
@@ -315,7 +325,7 @@ async def run_market_data(settings: Settings, stop: asyncio.Event) -> None:
 
                 if now_mono >= next_discovery:
                     _, broad_missing = await _broad_pairs_and_missing(settings)
-                    missing = list(dict.fromkeys(critical_missing + broad_missing))[:10]
+                    missing = list(dict.fromkeys(critical_missing + broad_missing))[:20]
                     await _discover_missing(client, settings, missing)
                     next_discovery = now_mono + max(settings.market_discovery_refresh_seconds, 2.0)
 

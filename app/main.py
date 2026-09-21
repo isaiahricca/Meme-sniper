@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
     await supervisor.stop()
 
 
-app = FastAPI(title=f"{settings.brand_name} V0.7.3", version="0.7.3", lifespan=lifespan)
+app = FastAPI(title=f"{settings.brand_name} V0.7.4", version="0.7.3", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -281,8 +281,8 @@ async def health():
         epoch = await verified_epoch(session)
     return {
         "status": "ok",
-        "version": "0.7.3",
-        "mode": "VERIFIED_PAPER_ONLY",
+        "version": "0.7.4",
+        "mode": "AGGRESSIVE_PAPER_CHALLENGE",
         "live_trading": False,
         "verified_epoch": epoch.isoformat() if epoch else None,
         "helius_enabled": settings.helius_enabled,
@@ -650,15 +650,15 @@ async def integrations():
          "purpose":"Conservative qualified-wallet simulation with measured forward-edge gates, Rug Shield and a daily loss circuit breaker.",
          "metrics":[["Open",copy_open],["Closed",copy_closed],["Invalid",copy_invalid],["Position",f"${settings.paper_copy_position_usd:g}"],["Min copy score",max(settings.paper_copy_min_copy_score,65)],["Daily stop",f"-${abs(settings.paper_copy_daily_loss_limit_usd):g}"]]},
 
-        {"name":"Signal Engine","kind":"RESEARCH / SHADOW STRATEGY","added":"V0.1 / shadow V0.7.3",
+        {"name":"Aggressive Challenge Engine","kind":"PAPER RESEARCH / SHADOW","added":"V0.7.4",
          "state":"SHADOW" if settings.paper_signal_shadow_mode else "ACTIVE",
-         "purpose":"Momentum/liquidity/flow strategy keeps simulated entries and outcomes for research, but SHADOW results are excluded from verified P/L.",
-         "metrics":[["Open shadow trades",sig_open],["Shadow closed",sig_shadow_closed],["All closed records",sig_closed],["Entry threshold",max(settings.paper_entry_score,88)]]},
+         "purpose":"Smart-wallet-confirmed momentum/liquidity/flow entries with cluster confirmation. Real fills, fees and slippage are simulated; results stay separate from verified P/L.",
+         "metrics":[["Open challenge trades",sig_open],["Challenge closed",sig_shadow_closed],["All closed records",sig_closed],["Entry threshold",max(settings.paper_entry_score,68)]]},
 
         {"name":"Local Intelligence Database","kind":"STORAGE","added":"V0.1",
          "state":"ACTIVE",
          "purpose":"Persistent research history used by scoring and the learning pipeline.",
-         "metrics":[["Tokens",token_count],["Events",event_count],["Database","SQLite"],["Verified epoch",states.get("v06_verified_epoch") or "ACTIVE"],["V0.7.3 epoch",states.get(settings.forward_epoch_key) or "STARTING"]]},
+         "metrics":[["Tokens",token_count],["Events",event_count],["Database","SQLite"],["Verified epoch",states.get("v06_verified_epoch") or "ACTIVE"],["V0.7.4 epoch",states.get(settings.forward_epoch_key) or "STARTING"]]},
 
         {"name":"Real-money Execution","kind":"SAFETY","added":"V0.1",
          "state":"LOCKED",
@@ -699,22 +699,22 @@ async def v07_live_feed(limit: int = 80):
 
 DASHBOARD = r'''<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Meme Sniper V0.7.3</title>
+<title>Meme Sniper V0.7.4</title>
 <style>
 :root{--bg:#080b11;--panel:#10151e;--panel2:#0d121a;--line:#26303d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--good:#3fb950;--bad:#f85149;--warn:#d29922}
 *{box-sizing:border-box}body{font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text);margin:0}.wrap{max-width:1440px;margin:auto;padding:26px}h1{margin:0;font-size:29px}.sub{color:var(--muted);margin-top:5px}.verified{color:var(--good);font-weight:700}.grid{display:grid;grid-template-columns:repeat(9,1fr);gap:10px;margin:20px 0}.card,.section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}.label{font-size:12px;color:var(--muted)}.big{font-size:23px;font-weight:750;margin-top:7px}.chartbox{position:relative;height:320px;margin-top:12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px}.chartbox canvas{width:100%;height:100%}.tooltip{display:none;position:absolute;pointer-events:none;background:#161b22;border:1px solid #30363d;padding:8px 10px;border-radius:7px;font-size:12px;z-index:4}.toolbar{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;align-items:center}.buttons{display:flex;gap:5px;flex-wrap:wrap}.buttons button{background:#161b22;color:var(--muted);border:1px solid #30363d;border-radius:7px;padding:6px 9px;cursor:pointer}.buttons button.active{color:var(--text);border-color:var(--accent);background:#10233d}.section{margin-top:18px;overflow:auto}.section h3{margin:2px 0 10px}table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}th,td{text-align:left;padding:9px;border-bottom:1px solid #222a35}th{color:var(--muted);font-weight:650}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.note{color:var(--muted);font-size:12px;margin-top:5px}
 @media(max-width:1100px){.grid{grid-template-columns:repeat(4,1fr)}}@media(max-width:650px){.grid{grid-template-columns:repeat(2,1fr)}.wrap{padding:14px}.chartbox{height:270px}}
 </style></head><body><div class="wrap">
-<div class="toolbar"><div><h1>Meme Sniper V0.7.3</h1></div><div class="buttons"><a href="/tokens" style="text-decoration:none"><button type="button">Token Explorer</button></a><a href="/command" style="text-decoration:none"><button type="button">Command Centre</button></a><a href="/traders" style="text-decoration:none"><button type="button">Top Traders</button></a></div></div><div class="sub"><span class="verified">● VERIFIED PAPER ONLY</span> · V0.7.3 forward test · signal strategy in SHADOW mode · real-money execution physically disabled</div>
+<div class="toolbar"><div><h1>Meme Sniper V0.7.4</h1></div><div class="buttons"><a href="/tokens" style="text-decoration:none"><button type="button">Token Explorer</button></a><a href="/command" style="text-decoration:none"><button type="button">Command Centre</button></a><a href="/traders" style="text-decoration:none"><button type="button">Top Traders</button></a></div></div><div class="sub"><span class="verified">● PAPER ONLY</span> · V0.7.4 AGGRESSIVE CHALLENGE · smart-wallet + cluster-confirmed signal lane · real-money execution physically disabled</div>
 <div class="grid" id="cards"></div>
 <div class="note" id="integrityLine" style="margin:-8px 0 12px 2px"></div>
 <div class="card">
- <div class="toolbar"><div><b>Verified cumulative P/L</b><div class="note">V0.7.3 forward test is separated from the old losing regime. Historical data is preserved under All.</div></div>
- <div><div class="buttons" id="strategyButtons"><button data-v="all" class="active">Overall</button><button data-v="copy">Smart wallet</button><button data-v="signal">Signals</button></div><div class="buttons" id="rangeButtons" style="margin-top:5px"><button data-v="forward" class="active">V0.7.3</button><button data-v="1h">1H</button><button data-v="today">Today</button><button data-v="7d">7D</button><button data-v="30d">30D</button><button data-v="all">All</button></div></div></div>
+ <div class="toolbar"><div><b>Verified lane cumulative P/L</b><div class="note">Verified results remain deliberately separate from the aggressive paper challenge. Historical data is preserved under All.</div></div>
+ <div><div class="buttons" id="strategyButtons"><button data-v="all" class="active">Overall</button><button data-v="copy">Smart wallet</button><button data-v="signal">Signals</button></div><div class="buttons" id="rangeButtons" style="margin-top:5px"><button data-v="forward" class="active">V0.7.4</button><button data-v="1h">1H</button><button data-v="today">Today</button><button data-v="7d">7D</button><button data-v="30d">30D</button><button data-v="all">All</button></div></div></div>
  <div class="chartbox"><canvas id="plChart"></canvas><div id="chartTip" class="tooltip"></div></div>
 </div>
 <div class="section"><h3>Verified paper-copy execution</h3><table><thead><tr><th>ID</th><th>Wallet</th><th>Token</th><th>Status</th><th>Integrity</th><th>Tier</th><th>Delay</th><th>Entry</th><th>Exit</th><th>P/L</th><th>MFE</th><th>MAE</th><th>Reason</th></tr></thead><tbody id="copyTrades"></tbody></table></div>
-<div class="section"><h3>Signal research trades <span class="warn">(SHADOW in V0.7.3)</span></h3><table><thead><tr><th>ID</th><th>Token</th><th>Status</th><th>Integrity</th><th>Score</th><th>Entry</th><th>Exit</th><th>P/L</th><th>MFE</th><th>MAE</th><th>Reason</th></tr></thead><tbody id="signalTrades"></tbody></table></div>
+<div class="section"><h3>Signal research trades <span class="warn">(SHADOW in V0.7.4)</span></h3><table><thead><tr><th>ID</th><th>Token</th><th>Status</th><th>Integrity</th><th>Score</th><th>Entry</th><th>Exit</th><th>P/L</th><th>MFE</th><th>MAE</th><th>Reason</th></tr></thead><tbody id="signalTrades"></tbody></table></div>
 <div class="section"><h3>Wallet copyability</h3><div class="note">Medians from same-pair forward measurements. Extreme, late or pair-mismatched observations are excluded rather than averaged.</div><table><thead><tr><th>Wallet</th><th>Copy score</th><th>Tier</th><th>Obs</th><th>Excluded</th><th>Edge</th><th>HFT penalty</th><th>10s median</th><th>30s median</th><th>60s median</th><th>5m median</th><th>+10% hit</th><th>Lead</th></tr></thead><tbody id="copyability"></tbody></table></div>
 <div class="section"><h3>Smart-wallet leaderboard</h3><div class="note" id="birdeyeStatus"></div><table><thead><tr><th>Wallet</th><th>Policy</th><th>Tracked</th><th>Birdeye</th><th>Tier</th><th>30d win</th><th>30d realised</th><th>Trades</th><th>Seen</th><th>Copy</th><th>Copy tier</th></tr></thead><tbody id="wallets"></tbody></table></div>
 <div class="section"><h3>Verified wallet swaps</h3><table><thead><tr><th>Time</th><th>Wallet</th><th>Action</th><th>Token</th><th>Token Δ</th><th>Quote Δ</th><th>Copy eligible</th><th>Integrity</th></tr></thead><tbody id="swaps"></tbody></table></div>
@@ -751,8 +751,8 @@ async function refreshPerformance(){const p=await fetch(`/api/performance?strate
 async function refreshAll(){
  const [o,t,s,w,c,sw,pc,st,bs]=await Promise.all([
  fetch('/api/overview').then(r=>r.json()),fetch('/api/tokens?limit=18').then(r=>r.json()),fetch('/api/signals?limit=18').then(r=>r.json()),fetch('/api/smart-wallets?limit=25').then(r=>r.json()),fetch('/api/copyability?limit=25').then(r=>r.json()),fetch('/api/wallet-swaps?limit=25').then(r=>r.json()),fetch('/api/paper-copy-trades?limit=25').then(r=>r.json()),fetch('/api/signal-trades?limit=25').then(r=>r.json()),fetch('/api/birdeye-status').then(r=>r.json())]);
- document.getElementById('cards').innerHTML=[['V0.7.3 P/L',money(o.forward_pnl_usd)],['Historical',money(o.realized_pnl_usd)],['Today',money(o.today_pnl_usd)],['Forward win',o.win_rate_pct+'%'],['Forward drawdown',money(o.max_drawdown_usd)],['Forward PF',o.profit_factor??'—'],['Forward trades',o.verified_trades],['Open',o.open_verified_trades],['Wallets',o.tracked_wallets]].map(x=>`<div class="card"><div class="label">${x[0]}</div><div class="big">${x[1]}</div></div>`).join('');
- document.getElementById('integrityLine').textContent=`Integrity: ${o.valid_measurements} valid wallet measurements · ${o.excluded_measurements} excluded · ${o.invalid_trades} invalid. Signal shadow: ${o.shadow_signal.trades} trades, ${money(o.shadow_signal.pnl_usd)}, PF ${o.shadow_signal.profit_factor??'—'}. Copy daily circuit: ${o.daily_loss_circuit_open?'PAUSED':'OPEN'} (${money(o.daily_copy_pnl_usd)}).`;
+ document.getElementById('cards').innerHTML=[['Challenge P/L',money(o.shadow_signal.pnl_usd)],['Challenge trades',o.shadow_signal.trades],['Challenge win',o.shadow_signal.win_rate_pct+'%'],['Challenge PF',o.shadow_signal.profit_factor??'—'],['Verified P/L',money(o.forward_pnl_usd)],['Verified trades',o.verified_trades],['Open verified',o.open_verified_trades],['Wallets',o.tracked_wallets],['Measurements',o.valid_measurements]].map(x=>`<div class="card"><div class="label">${x[0]}</div><div class="big">${x[1]}</div></div>`).join('');
+ document.getElementById('integrityLine').textContent=`AGGRESSIVE PAPER CHALLENGE: ${o.shadow_signal.trades} closed trades · ${o.shadow_signal.wins} wins · ${money(o.shadow_signal.pnl_usd)} P/L · PF ${o.shadow_signal.profit_factor??'—'}. VERIFIED lane remains separate. ${o.valid_measurements} wallet measurements · real-money execution OFF.`;
  document.getElementById('copyTrades').innerHTML=pc.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.wallet)}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.copy_tier||'—'}</td><td>${x.delay_s==null?'—':Number(x.delay_s).toFixed(1)+'s'}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('signalTrades').innerHTML=st.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.score}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('copyability').innerHTML=c.map(x=>`<tr><td class="mono">${short(x.wallet)}</td><td>${x.score}</td><td>${x.tier}</td><td>${x.observations}</td><td>${x.excluded}</td><td>${x.edge}</td><td>${x.hft_penalty}</td><td>${pct(x.r10)}</td><td>${pct(x.r30)}</td><td>${pct(x.r60)}</td><td>${pct(x.r300)}</td><td>${x.target_hit==null?'—':x.target_hit+'%'}</td><td>${x.lead==null?'—':x.lead+'s'}</td></tr>`).join('');
@@ -770,7 +770,7 @@ refreshAll();setInterval(refreshAll,5000);
 
 TOKEN_EXPLORER_PAGE = r'''<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Meme Sniper V0.7.3 - Token Explorer</title>
+<title>Meme Sniper V0.7.4 - Token Explorer</title>
 <style>
 :root{--bg:#14161c;--panel:#1e2128;--head:#3a3c43;--line:#30343c;--text:#f1f3f5;--muted:#8f939b;--good:#39d98a;--bad:#ff5c64;--accent:#4fb3ff;--orange:#ff9d18}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
@@ -791,7 +791,7 @@ td:first-child{text-align:left}.tokenCell{display:flex;align-items:center;gap:10
 .note{font-size:12px;color:var(--muted);margin:10px 2px 14px}.status{font-size:12px;color:var(--muted)}
 @media(max-width:1050px){.wrap{padding:8px}.panel{overflow-x:auto}table{min-width:1250px}}
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>Meme Sniper V0.7.3 - Token Explorer</h1><div class="sub">Live market context for coins Meme Sniper has discovered. Trading remains VERIFIED PAPER ONLY.</div></div><div class="actions"><a class="btn" href="/">Dashboard</a><a class="btn" href="/command">Command Centre</a><a class="btn" href="/traders">Top Traders</a><a class="btn" href="https://dexscreener.com/solana" target="_blank" rel="noopener noreferrer">DEX Screener</a></div></div>
+<div class="top"><div><h1>Meme Sniper V0.7.4 - Token Explorer</h1><div class="sub">Live market context for coins Meme Sniper has discovered. Trading remains VERIFIED PAPER ONLY.</div></div><div class="actions"><a class="btn" href="/">Dashboard</a><a class="btn" href="/command">Command Centre</a><a class="btn" href="/traders">Top Traders</a><a class="btn" href="https://dexscreener.com/solana" target="_blank" rel="noopener noreferrer">DEX Screener</a></div></div>
 <div class="note">Rows are ordered by Meme Sniper discovery time. Market metadata is enrichment only and cannot override the verified pair used by the trading engine. TXNS = 24h buys + sells. Unique trader counts are intentionally not fabricated because this DEX Screener endpoint does not provide them.</div>
 <div class="panel"><table><thead><tr>
 <th>TOKEN</th><th>SOURCE</th><th>MCAP</th><th>PRICE</th><th>AGE</th><th>TXNS</th><th>VOLUME</th><th>LIQUIDITY</th><th>5M</th><th>1H</th><th>6H</th><th>LINKS</th>

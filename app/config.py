@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     birdeye_min_wallet_score: float = 60.0
     birdeye_min_request_interval_seconds: float = 1.05
     smart_wallet_max_tracked: int = 75
+    # Research universe can be broader than the strict verified-copy lane.
+    research_wallet_min_score: float = 45.0
     smart_wallet_poll_seconds: int = 5
     wallet_policy_refresh_seconds: float = 3.0
 
@@ -176,6 +178,11 @@ class Settings(BaseSettings):
     # --------------------
     paper_starting_balance_usd: float = 20_000.0
     paper_position_usd: float = 25.0
+    # Challenge lane sizes down automatically in shallow pools rather than
+    # pretending a fixed notional can be filled without huge market impact.
+    paper_position_min_usd: float = 100.0
+    paper_position_liquidity_fraction: float = 0.005
+    paper_signal_reentry_cooldown_seconds: int = 900
     paper_max_open_positions: int = 3
     paper_fee_bps: float = 100.0
     paper_base_slippage_bps: float = 75.0

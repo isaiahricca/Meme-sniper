@@ -17,7 +17,7 @@ from app.services.trader_intelligence import run_trader_intelligence
 from app.services.ai_ensemble import run_ai_ensemble
 from app.services.x_social import run_x_social
 from app.services.candle_sampler import run_candle_sampler
-from app.services.forward_test import ensure_forward_epoch
+from app.services.forward_test import ensure_forward_epoch, ensure_named_epoch
 
 log = logging.getLogger("supervisor")
 

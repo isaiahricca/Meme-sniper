@@ -7,7 +7,8 @@ from sqlalchemy import select, func
 
 from app.config import Settings
 from app.db import SessionLocal
-from app.models import SystemState, PaperCopyTradeV06, SignalPaperTradeV06
+from app.models import SystemState, PaperCopyTradeV06, SignalPaperTradeV06, PairLatestPrice
+from app.services.paper import simulate_sell
 
 PERTH = ZoneInfo("Australia/Perth")
 
@@ -109,7 +110,13 @@ async def shadow_signal_summary(settings: Settings) -> dict:
     """Return V0.7.3 signal shadow results without mixing them into verified P/L."""
     epoch = await forward_epoch(settings)
     if epoch is None:
-        return {"trades": 0, "wins": 0, "pnl_usd": 0.0, "profit_factor": None, "win_rate_pct": 0.0}
+        return {
+            "trades": 0, "wins": 0, "pnl_usd": 0.0, "profit_factor": None,
+            "win_rate_pct": 0.0, "open_trades": 0, "open_notional_usd": 0.0,
+            "unrealized_pnl_usd": 0.0, "equity_pnl_usd": 0.0,
+        }
+    unrealized = 0.0
+    open_notional = 0.0
     async with SessionLocal() as session:
         rows = list((await session.execute(
             select(SignalPaperTradeV06).where(
@@ -118,6 +125,28 @@ async def shadow_signal_summary(settings: Settings) -> dict:
                 SignalPaperTradeV06.closed_at >= epoch,
             )
         )).scalars())
+        opens = list((await session.execute(
+            select(SignalPaperTradeV06).where(
+                SignalPaperTradeV06.status == "open",
+                SignalPaperTradeV06.integrity_status == "shadow_open",
+                SignalPaperTradeV06.opened_at >= epoch,
+            )
+        )).scalars())
+        for trade in opens:
+            open_notional += float(trade.notional_usd or 0.0)
+            if not trade.qty or not trade.pair_address:
+                continue
+            latest = await session.get(PairLatestPrice, trade.pair_address)
+            if latest is None or latest.price_usd <= 0 or not latest.liquidity_usd or latest.liquidity_usd <= 0:
+                continue
+            sell = simulate_sell(
+                market_price=latest.price_usd,
+                qty=trade.qty,
+                liquidity_usd=latest.liquidity_usd,
+                fee_bps=settings.paper_fee_bps,
+                base_slippage_bps=settings.paper_base_slippage_bps,
+            )
+            unrealized += (sell.notional_usd - sell.fee_usd) - float(trade.notional_usd or 0.0)
     pnls = [float(x.pnl_usd or 0.0) for x in rows]
     gross_profit = sum(x for x in pnls if x > 0)
     gross_loss = -sum(x for x in pnls if x < 0)
@@ -130,4 +159,8 @@ async def shadow_signal_summary(settings: Settings) -> dict:
         "gross_loss_usd": round(gross_loss, 4),
         "profit_factor": round(gross_profit / gross_loss, 3) if gross_loss > 0 else (None if gross_profit == 0 else 999.0),
         "win_rate_pct": round(wins / len(pnls) * 100.0, 1) if pnls else 0.0,
+        "open_trades": len(opens),
+        "open_notional_usd": round(open_notional, 2),
+        "unrealized_pnl_usd": round(unrealized, 4),
+        "equity_pnl_usd": round(sum(pnls) + unrealized, 4),
     }

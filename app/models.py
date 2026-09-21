@@ -533,6 +533,9 @@ class AIEnsembleDecisionV074(Base):
     token_mint: Mapped[str] = mapped_column(String(100), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     packet_json: Mapped[str] = mapped_column(Text, default="{}")
+    signal_age_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trade_status_at_analysis: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    pre_entry: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
     openai_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     openai_model: Mapped[str | None] = mapped_column(String(80), nullable=True)

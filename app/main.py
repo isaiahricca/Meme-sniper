@@ -20,7 +20,7 @@ from app.models import (
     SystemState, TokenPairState, WalletSwapV06, WalletCopyabilityV06, WalletSwapMeasurementV06,
     PaperCopyTradeV06, SignalPaperTradeV06, SignalMeasurementV06,
     NansenSmartTradeV07, TraderIntelligenceV07, SmartMoneyClusterV07, TokenRiskV072,
-    AIEnsembleDecisionV074,
+    AIEnsembleDecisionV074, XSocialSnapshotV074, PriceCandleV074,
 )
 from app.services.supervisor import Supervisor
 from app.services.performance import build_performance, verified_epoch
@@ -514,6 +514,105 @@ async def signal_trades(limit: int = 50):
         } for r in rows]
 
 
+@app.get("/api/challenge-curve")
+async def challenge_curve():
+    async with SessionLocal() as session:
+        epoch = None
+        epoch_row = await session.get(SystemState, settings.forward_epoch_key)
+        if epoch_row is not None:
+            try:
+                epoch = datetime.fromisoformat(epoch_row.value)
+                if epoch.tzinfo is None:
+                    epoch = epoch.replace(tzinfo=timezone.utc)
+            except Exception:
+                epoch = None
+        stmt = select(SignalPaperTradeV06).where(
+            SignalPaperTradeV06.status == "closed",
+            SignalPaperTradeV06.integrity_status == "shadow_closed",
+        )
+        if epoch is not None:
+            stmt = stmt.where(SignalPaperTradeV06.closed_at >= epoch)
+        rows = list((await session.execute(
+            stmt.order_by(SignalPaperTradeV06.closed_at.asc(), SignalPaperTradeV06.id.asc())
+        )).scalars())
+        running = 0.0
+        curve = []
+        for row in rows:
+            running += float(row.pnl_usd or 0.0)
+            curve.append({
+                "ts": row.closed_at.isoformat() if row.closed_at else None,
+                "cumulative_pnl": round(running, 4),
+                "trade_pnl": round(float(row.pnl_usd or 0.0), 4),
+                "pnl_pct": row.pnl_pct,
+                "mint": row.token_mint,
+                "reason": row.exit_reason,
+            })
+        return {"curve": curve, "closed": len(rows), "realized_pnl": round(running, 4)}
+
+
+@app.get("/api/candle-watchlist")
+async def candle_watchlist(limit: int = 24):
+    limit = min(max(limit, 1), 50)
+    async with SessionLocal() as session:
+        rows = list((await session.execute(
+            select(PriceCandleV074.token_mint, func.max(PriceCandleV074.bucket_at).label("latest"))
+            .group_by(PriceCandleV074.token_mint)
+            .order_by(func.max(PriceCandleV074.bucket_at).desc())
+            .limit(limit)
+        )).all())
+        mints = [r[0] for r in rows]
+        tokens = {}
+        if mints:
+            token_rows = list((await session.execute(select(Token).where(Token.mint.in_(mints)))).scalars())
+            tokens = {t.mint: t for t in token_rows}
+        return [{
+            "mint": mint,
+            "symbol": tokens[mint].symbol if mint in tokens else None,
+            "name": tokens[mint].name if mint in tokens else None,
+            "latest": latest.isoformat() if latest else None,
+        } for mint, latest in rows]
+
+
+@app.get("/api/candles")
+async def candles(mint: str = Query(..., min_length=20, max_length=100), limit: int = 120):
+    limit = min(max(limit, 10), 180)
+    async with SessionLocal() as session:
+        rows = list((await session.execute(
+            select(PriceCandleV074)
+            .where(PriceCandleV074.token_mint == mint)
+            .order_by(PriceCandleV074.bucket_at.desc())
+            .limit(limit)
+        )).scalars())
+        rows.reverse()
+        return [{
+            "t": r.bucket_at.isoformat(),
+            "o": r.open, "h": r.high, "l": r.low, "c": r.close,
+            "liquidity": r.liquidity_usd, "samples": r.samples,
+        } for r in rows]
+
+
+@app.get("/api/x-social-status")
+async def x_social_status():
+    async with SessionLocal() as session:
+        latest = (await session.execute(
+            select(XSocialSnapshotV074)
+            .where(XSocialSnapshotV074.token_mint != "__GLOBAL__")
+            .order_by(XSocialSnapshotV074.fetched_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        covered = int((await session.execute(
+            select(func.count(func.distinct(XSocialSnapshotV074.token_mint)))
+            .where(XSocialSnapshotV074.token_mint != "__GLOBAL__")
+        )).scalar_one() or 0)
+        return {
+            "configured": bool(settings.x_bearer_token),
+            "enabled": settings.x_enabled,
+            "covered_tokens": covered,
+            "latest_at": latest.fetched_at.isoformat() if latest else None,
+            "latest_score": latest.social_score if latest else None,
+        }
+
+
 @app.get("/api/ai-ensemble")
 async def ai_ensemble(limit: int = 25):
     limit = min(max(limit, 1), 100)
@@ -551,6 +650,8 @@ async def ai_ensemble(limit: int = 25):
             "enabled": settings.ai_ensemble_enabled,
             "openai_configured": bool(settings.openai_api_key),
             "claude_configured": bool(settings.anthropic_api_key),
+            "x_configured": bool(settings.x_bearer_token),
+            "ai_trade_gate": bool(settings.ai_trade_gate_enabled),
             "openai_model": settings.openai_model,
             "claude_model": settings.anthropic_model,
             "total_decisions": int(total or 0),
@@ -787,13 +888,22 @@ DASHBOARD = r'''<!doctype html>
 <title>Meme Sniper V0.7.4</title>
 <style>
 :root{--bg:#080b11;--panel:#10151e;--panel2:#0d121a;--line:#26303d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--good:#3fb950;--bad:#f85149;--warn:#d29922}
-*{box-sizing:border-box}body{font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text);margin:0}.wrap{max-width:1440px;margin:auto;padding:26px}h1{margin:0;font-size:29px}.sub{color:var(--muted);margin-top:5px}.verified{color:var(--good);font-weight:700}.grid{display:grid;grid-template-columns:repeat(9,1fr);gap:10px;margin:20px 0}.card,.section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}.label{font-size:12px;color:var(--muted)}.big{font-size:23px;font-weight:750;margin-top:7px}.chartbox{position:relative;height:320px;margin-top:12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px}.chartbox canvas{width:100%;height:100%}.tooltip{display:none;position:absolute;pointer-events:none;background:#161b22;border:1px solid #30363d;padding:8px 10px;border-radius:7px;font-size:12px;z-index:4}.toolbar{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;align-items:center}.buttons{display:flex;gap:5px;flex-wrap:wrap}.buttons button{background:#161b22;color:var(--muted);border:1px solid #30363d;border-radius:7px;padding:6px 9px;cursor:pointer}.buttons button.active{color:var(--text);border-color:var(--accent);background:#10233d}.section{margin-top:18px;overflow:auto}.section h3{margin:2px 0 10px}table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}th,td{text-align:left;padding:9px;border-bottom:1px solid #222a35}th{color:var(--muted);font-weight:650}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.note{color:var(--muted);font-size:12px;margin-top:5px}
+*{box-sizing:border-box}body{font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text);margin:0}.wrap{max-width:1440px;margin:auto;padding:26px}h1{margin:0;font-size:29px}.sub{color:var(--muted);margin-top:5px}.verified{color:var(--good);font-weight:700}.grid{display:grid;grid-template-columns:repeat(9,1fr);gap:10px;margin:20px 0}.card,.section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}.label{font-size:12px;color:var(--muted)}.big{font-size:23px;font-weight:750;margin-top:7px}.chartbox{position:relative;height:320px;margin-top:12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px}.chartbox canvas{width:100%;height:100%}.tooltip{display:none;position:absolute;pointer-events:none;background:#161b22;border:1px solid #30363d;padding:8px 10px;border-radius:7px;font-size:12px;z-index:4}.toolbar{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;align-items:center}.buttons{display:flex;gap:5px;flex-wrap:wrap}.buttons button{background:#161b22;color:var(--muted);border:1px solid #30363d;border-radius:7px;padding:6px 9px;cursor:pointer}.buttons button.active{color:var(--text);border-color:var(--accent);background:#10233d}.section{margin-top:18px;overflow:auto}.section h3{margin:2px 0 10px}table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}th,td{text-align:left;padding:9px;border-bottom:1px solid #222a35}th{color:var(--muted);font-weight:650}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.note{color:var(--muted);font-size:12px;margin-top:5px}select{background:#161b22;color:var(--text);border:1px solid #30363d;border-radius:7px;padding:7px 9px;max-width:360px}
 @media(max-width:1100px){.grid{grid-template-columns:repeat(4,1fr)}}@media(max-width:650px){.grid{grid-template-columns:repeat(2,1fr)}.wrap{padding:14px}.chartbox{height:270px}}
 </style></head><body><div class="wrap">
 <div class="toolbar"><div><h1>Meme Sniper V0.7.4</h1></div><div class="buttons"><a href="/tokens" style="text-decoration:none"><button type="button">Token Explorer</button></a><a href="/command" style="text-decoration:none"><button type="button">Command Centre</button></a><a href="/traders" style="text-decoration:none"><button type="button">Top Traders</button></a></div></div><div class="sub"><span class="verified">● PAPER ONLY</span> · V0.7.4 AGGRESSIVE CHALLENGE · smart-wallet + cluster-confirmed signal lane · real-money execution physically disabled</div>
 <div class="grid" id="cards"></div>
 <div class="note" id="integrityLine" style="margin:-8px 0 6px 2px"></div>
 <div class="note" id="aiStatusLine" style="margin:0 0 12px 2px"></div>
+<div class="card">
+ <div class="toolbar"><div><b>Aggressive challenge cumulative P/L</b><div class="note">Actual V0.7.4 challenge curve. The chart below is the strict Verified lane, which is why it was blank at $0.</div></div><div class="note" id="challengeChartStatus"></div></div>
+ <div class="chartbox"><canvas id="challengeChart"></canvas></div>
+</div>
+<div class="card" style="margin-top:18px">
+ <div class="toolbar"><div><b>Live market candles</b><div class="note">1-minute OHLC candles sampled from the exact DEX pair used by the simulator.</div></div><div><select id="candleToken"><option value="">Collecting candle data…</option></select></div></div>
+ <div class="chartbox"><canvas id="candleChart"></canvas></div>
+ <div class="note" id="candleStatus">Collecting exact-pair samples.</div>
+</div>
 <div class="card">
  <div class="toolbar"><div><b>Verified lane cumulative P/L</b><div class="note">Verified results remain deliberately separate from the aggressive paper challenge. Historical data is preserved under All.</div></div>
  <div><div class="buttons" id="strategyButtons"><button data-v="all" class="active">Overall</button><button data-v="copy">Smart wallet</button><button data-v="signal">Signals</button></div><div class="buttons" id="rangeButtons" style="margin-top:5px"><button data-v="forward" class="active">V0.7.4</button><button data-v="1h">1H</button><button data-v="today">Today</button><button data-v="7d">7D</button><button data-v="30d">30D</button><button data-v="all">All</button></div></div></div>
@@ -812,10 +922,51 @@ const short=x=>x?x.slice(0,5)+'…'+x.slice(-5):'—';
 const money=x=>{if(x==null)return '—';const n=Number(x);return (n<0?'-$':'$')+Math.abs(n).toLocaleString(undefined,{maximumFractionDigits:4})};
 const pct=x=>x==null?'—':(Number(x)>=0?'+':'')+Number(x).toFixed(2)+'%';
 const perth=t=>new Date(t).toLocaleTimeString('en-AU',{timeZone:'Australia/Perth',hour12:false});
-let strategy='all', range='forward', chartData=[];
+let strategy='all', range='forward', chartData=[], challengeData=[], candleData=[], candleMint='';
 function setButtons(id, value){document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('active',b.dataset.v===value));}
 document.querySelectorAll('#strategyButtons button').forEach(b=>b.onclick=()=>{strategy=b.dataset.v;setButtons('strategyButtons',strategy);refreshPerformance()});
 document.querySelectorAll('#rangeButtons button').forEach(b=>b.onclick=()=>{range=b.dataset.v;setButtons('rangeButtons',range);refreshPerformance()});
+
+function drawChallengeChart(){
+ const canvas=document.getElementById('challengeChart'),box=canvas.parentElement,dpr=window.devicePixelRatio||1;
+ const w=box.clientWidth-16,h=box.clientHeight-16;canvas.width=w*dpr;canvas.height=h*dpr;canvas.style.width=w+'px';canvas.style.height=h+'px';
+ const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);const pad={l:58,r:18,t:18,b:34};
+ const vals=challengeData.map(x=>Number(x.cumulative_pnl));vals.push(0);let ymin=Math.min(...vals),ymax=Math.max(...vals);if(ymin===ymax){ymin-=1;ymax+=1}const span=ymax-ymin;ymin-=span*.08;ymax+=span*.08;
+ ctx.font='11px Segoe UI';ctx.strokeStyle='#26303d';ctx.fillStyle='#8b949e';ctx.lineWidth=1;
+ for(let i=0;i<=4;i++){const yy=pad.t+(h-pad.t-pad.b)*i/4;ctx.beginPath();ctx.moveTo(pad.l,yy);ctx.lineTo(w-pad.r,yy);ctx.stroke();const v=ymax-(ymax-ymin)*i/4;ctx.fillText((v<0?'-$':'$')+Math.abs(v).toFixed(0),5,yy+4)}
+ if(!challengeData.length){ctx.fillText('Waiting for current-epoch closed challenge trades.',pad.l+20,h/2);return}
+ const x=i=>challengeData.length===1?(pad.l+w-pad.r)/2:pad.l+(w-pad.l-pad.r)*i/(challengeData.length-1),y=v=>pad.t+(ymax-v)/(ymax-ymin)*(h-pad.t-pad.b);
+ ctx.strokeStyle=challengeData[challengeData.length-1].cumulative_pnl>=0?'#3fb950':'#f85149';ctx.lineWidth=2;ctx.beginPath();challengeData.forEach((p,i)=>{const xx=x(i),yy=y(Number(p.cumulative_pnl));i?ctx.lineTo(xx,yy):ctx.moveTo(xx,yy)});ctx.stroke();
+}
+
+function drawCandles(){
+ const canvas=document.getElementById('candleChart'),box=canvas.parentElement,dpr=window.devicePixelRatio||1;
+ const w=box.clientWidth-16,h=box.clientHeight-16;canvas.width=w*dpr;canvas.height=h*dpr;canvas.style.width=w+'px';canvas.style.height=h+'px';
+ const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);const pad={l:72,r:18,t:18,b:34};
+ if(!candleData.length){ctx.fillStyle='#8b949e';ctx.font='14px Segoe UI';ctx.fillText('Collecting 1-minute OHLC samples…',pad.l+20,h/2);return}
+ let lo=Math.min(...candleData.map(x=>Number(x.l))),hi=Math.max(...candleData.map(x=>Number(x.h)));if(lo===hi){lo*=.999;hi*=1.001}const span=hi-lo;lo-=span*.05;hi+=span*.05;
+ const y=v=>pad.t+(hi-v)/(hi-lo)*(h-pad.t-pad.b),step=(w-pad.l-pad.r)/Math.max(candleData.length,1),body=Math.max(2,Math.min(9,step*.58));
+ ctx.font='10px Segoe UI';ctx.strokeStyle='#26303d';ctx.fillStyle='#8b949e';
+ for(let i=0;i<=4;i++){const yy=pad.t+(h-pad.t-pad.b)*i/4;ctx.beginPath();ctx.moveTo(pad.l,yy);ctx.lineTo(w-pad.r,yy);ctx.stroke();const v=hi-(hi-lo)*i/4;ctx.fillText(v<0.001?v.toExponential(2):v.toFixed(6),4,yy+3)}
+ candleData.forEach((p,i)=>{const x=pad.l+step*(i+.5),up=Number(p.c)>=Number(p.o),col=up?'#3fb950':'#f85149';ctx.strokeStyle=col;ctx.fillStyle=col;ctx.beginPath();ctx.moveTo(x,y(Number(p.h)));ctx.lineTo(x,y(Number(p.l)));ctx.stroke();const top=y(Math.max(Number(p.o),Number(p.c))),bottom=y(Math.min(Number(p.o),Number(p.c)));ctx.fillRect(x-body/2,top,body,Math.max(1,bottom-top))});
+ ctx.fillStyle='#8b949e';if(candleData.length){ctx.fillText(perth(candleData[0].t),pad.l,h-9);const last=perth(candleData[candleData.length-1].t);ctx.fillText(last,w-pad.r-ctx.measureText(last).width,h-9)}
+}
+
+async function refreshChallengeChart(){
+ const p=await fetch('/api/challenge-curve').then(r=>r.json());challengeData=p.curve||[];drawChallengeChart();document.getElementById('challengeChartStatus').textContent=(p.closed||0)+' closed · '+money(p.realized_pnl||0);
+}
+
+async function refreshCandleChart(){
+ const watch=await fetch('/api/candle-watchlist?limit=24').then(r=>r.json());
+ const sel=document.getElementById('candleToken'),previous=candleMint||sel.value;
+ if(watch.length){
+   sel.innerHTML=watch.map(x=>`<option value="${x.mint}">${x.symbol||short(x.mint)} · ${short(x.mint)}</option>`).join('');
+   candleMint=watch.some(x=>x.mint===previous)?previous:watch[0].mint;sel.value=candleMint;
+   candleData=await fetch('/api/candles?mint='+encodeURIComponent(candleMint)+'&limit=120').then(r=>r.json());
+   document.getElementById('candleStatus').textContent=`${candleData.length} one-minute candles · exact-pair sampled market data · ${short(candleMint)}`;
+ }else{candleData=[];document.getElementById('candleStatus').textContent='Collecting the first exact-pair candles now.'}
+ drawCandles();
+}
 
 function drawChart(){
  const canvas=document.getElementById('plChart'), box=canvas.parentElement, dpr=window.devicePixelRatio||1;
@@ -832,15 +983,15 @@ function drawChart(){
  canvas._geom={x,y,w,h,pad};
 }
 const canvas=document.getElementById('plChart'),tip=document.getElementById('chartTip');
-canvas.addEventListener('mousemove',e=>{if(!chartData.length||!canvas._geom)return;const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,g=canvas._geom;let idx=chartData.length===1?0:Math.round((mx-g.pad.l)/(g.w-g.pad.l-g.pad.r)*(chartData.length-1));idx=Math.max(0,Math.min(chartData.length-1,idx));const p=chartData[idx];tip.style.display='block';tip.style.left=Math.min(mx+12,r.width-210)+'px';tip.style.top=Math.max(8,e.clientY-r.top-60)+'px';tip.innerHTML=`<b>${money(p.cumulative_pnl)}</b> cumulative<br>${p.strategy}: ${p.trade_pnl>=0?'+':''}${money(p.trade_pnl)}<br>${short(p.token)} · ${new Date(p.ts).toLocaleString('en-AU',{timeZone:'Australia/Perth'})}`});canvas.addEventListener('mouseleave',()=>tip.style.display='none');window.addEventListener('resize',drawChart);
+canvas.addEventListener('mousemove',e=>{if(!chartData.length||!canvas._geom)return;const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,g=canvas._geom;let idx=chartData.length===1?0:Math.round((mx-g.pad.l)/(g.w-g.pad.l-g.pad.r)*(chartData.length-1));idx=Math.max(0,Math.min(chartData.length-1,idx));const p=chartData[idx];tip.style.display='block';tip.style.left=Math.min(mx+12,r.width-210)+'px';tip.style.top=Math.max(8,e.clientY-r.top-60)+'px';tip.innerHTML=`<b>${money(p.cumulative_pnl)}</b> cumulative<br>${p.strategy}: ${p.trade_pnl>=0?'+':''}${money(p.trade_pnl)}<br>${short(p.token)} · ${new Date(p.ts).toLocaleString('en-AU',{timeZone:'Australia/Perth'})}`});canvas.addEventListener('mouseleave',()=>tip.style.display='none');window.addEventListener('resize',()=>{drawChart();drawChallengeChart();drawCandles()});document.getElementById('candleToken').addEventListener('change',e=>{candleMint=e.target.value;refreshCandleChart()});
 
 async function refreshPerformance(){const p=await fetch(`/api/performance?strategy=${strategy}&range=${range}`).then(r=>r.json());chartData=p.curve||[];drawChart();}
 async function refreshAll(){
- const [o,t,s,w,c,sw,pc,st,bs,ai]=await Promise.all([
- fetch('/api/overview').then(r=>r.json()),fetch('/api/tokens?limit=18').then(r=>r.json()),fetch('/api/signals?limit=18').then(r=>r.json()),fetch('/api/smart-wallets?limit=25').then(r=>r.json()),fetch('/api/copyability?limit=25').then(r=>r.json()),fetch('/api/wallet-swaps?limit=25').then(r=>r.json()),fetch('/api/paper-copy-trades?limit=25').then(r=>r.json()),fetch('/api/signal-trades?limit=25').then(r=>r.json()),fetch('/api/birdeye-status').then(r=>r.json()),fetch('/api/ai-ensemble?limit=25').then(r=>r.json())]);
+ const [o,t,s,w,c,sw,pc,st,bs,ai,xs]=await Promise.all([
+ fetch('/api/overview').then(r=>r.json()),fetch('/api/tokens?limit=18').then(r=>r.json()),fetch('/api/signals?limit=18').then(r=>r.json()),fetch('/api/smart-wallets?limit=25').then(r=>r.json()),fetch('/api/copyability?limit=25').then(r=>r.json()),fetch('/api/wallet-swaps?limit=25').then(r=>r.json()),fetch('/api/paper-copy-trades?limit=25').then(r=>r.json()),fetch('/api/signal-trades?limit=25').then(r=>r.json()),fetch('/api/birdeye-status').then(r=>r.json()),fetch('/api/ai-ensemble?limit=25').then(r=>r.json()),fetch('/api/x-social-status').then(r=>r.json())]);
  document.getElementById('cards').innerHTML=[['Challenge equity P/L',money(o.shadow_signal.equity_pnl_usd)],['Realized',money(o.shadow_signal.pnl_usd)],['Open challenge',o.shadow_signal.open_trades],['Deployed',money(o.shadow_signal.open_notional_usd)],['Closed trades',o.shadow_signal.trades],['Challenge win',o.shadow_signal.win_rate_pct+'%'],['Challenge PF',o.shadow_signal.profit_factor??'—'],['Verified P/L',money(o.forward_pnl_usd)],['Wallets',o.tracked_wallets]].map(x=>`<div class="card"><div class="label">${x[0]}</div><div class="big">${x[1]}</div></div>`).join('');
  const g=o.challenge_gate||{}; document.getElementById('integrityLine').textContent=`AGGRESSIVE PAPER CHALLENGE: ${o.shadow_signal.open_trades} open / ${o.shadow_signal.trades} closed · realized ${money(o.shadow_signal.pnl_usd)} · unrealized ${money(o.shadow_signal.unrealized_pnl_usd)} · equity P/L ${money(o.shadow_signal.equity_pnl_usd)} · gates: ${g.market_eligible??0} market-ready, ${g.queued??0} queued, ${g.no_confirmation??0} no-confirm, ${g.score_below_entry??0} low-score, ${g.token_cooldown??0} cooldown · real-money OFF.`;
- const aiReady=(ai.openai_configured?'OpenAI '+ai.openai_model:'OpenAI NEEDS KEY')+' · '+(ai.claude_configured?'Claude '+ai.claude_model:'Claude NEEDS KEY'); document.getElementById('aiStatusLine').textContent=`AI COMMITTEE: ${aiReady} · ${ai.total_decisions} decisions · ${ai.pre_entry_decisions} pre-entry · ${ai.both_models_ok} dual-model responses · shadow only.`;
+ const aiReady=(ai.openai_configured?'OpenAI '+ai.openai_model:'OpenAI NEEDS KEY')+' · '+(ai.claude_configured?'Claude '+ai.claude_model:'Claude NEEDS KEY');const xReady=xs.configured?'X SOCIAL ACTIVE':'X SOCIAL NEEDS BEARER TOKEN'; document.getElementById('aiStatusLine').textContent=`AI COMMITTEE: ${aiReady} · ${ai.total_decisions} decisions · ${ai.both_models_ok} dual-model responses · AI ENTRY GATE ${ai.ai_trade_gate?'ON':'OFF'} · ${xReady} · ${xs.covered_tokens||0} tokens enriched.`;
  document.getElementById('copyTrades').innerHTML=pc.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.wallet)}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.copy_tier||'—'}</td><td>${x.delay_s==null?'—':Number(x.delay_s).toFixed(1)+'s'}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('signalTrades').innerHTML=st.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.score}</td><td>${money(x.notional_usd)}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('aiDecisions').innerHTML=(ai.rows||[]).map(x=>`<tr><td>${x.signal_id}</td><td class="mono">${short(x.mint)}</td><td>${x.pre_entry?'YES':'NO'}</td><td>${x.openai_status==='ok'?(x.openai_verdict||'—'):x.openai_status}</td><td>${x.openai_confidence==null?'—':Number(x.openai_confidence).toFixed(0)+'%'}</td><td>${x.openai_edge==null?'—':pct(x.openai_edge)}</td><td>${x.claude_status==='ok'?(x.claude_verdict||'—'):x.claude_status}</td><td>${x.claude_confidence==null?'—':Number(x.claude_confidence).toFixed(0)+'%'}</td><td>${x.claude_edge==null?'—':pct(x.claude_edge)}</td><td>${x.consensus||'—'}</td><td class="${(x.trade_pnl_pct||0)>=0?'good':'bad'}">${x.trade_pnl_pct==null?'—':pct(x.trade_pnl_pct)}</td><td>${x.trade_reason||x.trade_status||'—'}</td></tr>`).join('');
@@ -850,7 +1001,7 @@ async function refreshAll(){
  document.getElementById('swaps').innerHTML=sw.map(x=>`<tr><td>${perth(x.ts)}</td><td class="mono">${short(x.wallet)}</td><td>${x.action}</td><td class="mono">${short(x.mint)}</td><td>${Number(x.token_delta).toLocaleString(undefined,{maximumFractionDigits:4})}</td><td>${x.quote_delta==null?'—':Number(x.quote_delta).toFixed(4)}</td><td>${x.copy_eligible?'YES':'NO'}</td><td>${x.integrity}${x.invalid_reason?' · '+x.invalid_reason:''}</td></tr>`).join('');
  document.getElementById('signals').innerHTML=s.map(x=>`<tr><td>${perth(x.ts)}</td><td class="mono">${short(x.mint)}</td><td>${x.score}</td><td>${x.decision}</td><td>${x.momentum}</td><td>${x.liquidity}</td><td>${x.flow}</td><td>${x.wallet}</td></tr>`).join('');
  document.getElementById('tokens').innerHTML=t.map(x=>`<tr><td>${x.symbol||'—'}</td><td class="mono">${short(x.mint)}</td><td>${money(x.price_usd)}</td><td>${money(x.liquidity_usd)}</td><td>${x.price_change_m5_pct==null?'—':pct(x.price_change_m5_pct)}</td><td>${x.buys_m5??'—'} / ${x.sells_m5??'—'}</td><td class="mono">${short(x.pair_address)}</td></tr>`).join('');
- await refreshPerformance();
+ await Promise.all([refreshPerformance(),refreshChallengeChart(),refreshCandleChart()]);
 }
 refreshAll();setInterval(refreshAll,5000);
 </script></body></html>'''

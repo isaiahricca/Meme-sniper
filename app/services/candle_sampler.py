@@ -14,14 +14,16 @@ from app.models import (
 log = logging.getLogger("candles")
 
 
-def aware(dt):
+def utc_naive(dt):
     if dt is None:
         return None
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def minute_bucket(now: datetime) -> datetime:
-    return now.replace(second=0, microsecond=0)
+    return utc_naive(now).replace(second=0, microsecond=0)
 
 
 async def _watch_mints(settings: Settings) -> list[str]:
@@ -61,6 +63,7 @@ async def _sample(settings: Settings) -> int:
     if not mints:
         return 0
     now = datetime.now(timezone.utc)
+    now_db = utc_naive(now)
     bucket = minute_bucket(now)
     count = 0
     async with SessionLocal() as session:
@@ -74,8 +77,8 @@ async def _sample(settings: Settings) -> int:
             latest = await session.get(PairLatestPrice, state.pair_address)
             if latest is None or latest.price_usd <= 0:
                 continue
-            ts = aware(latest.ts)
-            if ts is None or (now - ts).total_seconds() > max(settings.market_max_price_age_seconds * 2, 12):
+            ts = utc_naive(latest.ts)
+            if ts is None or (now_db - ts).total_seconds() > max(settings.market_max_price_age_seconds * 2, 12):
                 continue
             row = (await session.execute(
                 select(PriceCandleV074)
@@ -104,7 +107,7 @@ async def _sample(settings: Settings) -> int:
                 row.samples = int(row.samples or 0) + 1
             count += 1
 
-        cutoff = now - timedelta(minutes=max(settings.candle_history_minutes, 30))
+        cutoff = now_db - timedelta(minutes=max(settings.candle_history_minutes, 30))
         await session.execute(delete(PriceCandleV074).where(PriceCandleV074.bucket_at < cutoff))
         await session.commit()
     return count

@@ -205,6 +205,25 @@ class Settings(BaseSettings):
 
     # This remains physically ignored/blocked in V0.6.
     # --------------------
+    # X / Twitter social intelligence
+    # --------------------
+    x_enabled: bool = True
+    x_bearer_token: str = ""
+    x_poll_seconds: float = 45.0
+    x_max_searches_per_hour: int = 20
+    x_candidate_limit: int = 4
+    x_search_results: int = 10
+    x_snapshot_ttl_seconds: int = 300
+    x_discovery_enabled: bool = True
+
+    # --------------------
+    # Live market candles for dashboard
+    # --------------------
+    candle_sample_seconds: float = 5.0
+    candle_watch_limit: int = 24
+    candle_history_minutes: int = 180
+
+    # --------------------
     # Dual-model AI ensemble (research/shadow only)
     # --------------------
     ai_ensemble_enabled: bool = True
@@ -218,6 +237,10 @@ class Settings(BaseSettings):
     ai_max_analyses_per_hour: int = 20
     ai_request_timeout_seconds: float = 25.0
     ai_max_output_tokens: int = 700
+    ai_trade_gate_enabled: bool = True
+    ai_trade_gate_max_age_seconds: int = 180
+    ai_trade_gate_min_confidence: float = 60.0
+    ai_trade_gate_edge_buffer_pct: float = 0.5
 
     live_trading_enabled: bool = False
 

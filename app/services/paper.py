@@ -19,9 +19,14 @@ def estimate_slippage_bps(
 ) -> float:
     if liquidity_usd <= 0:
         return 10_000.0
-    # Conservative placeholder impact curve.
-    impact_bps = (notional_usd / liquidity_usd) * 100_000.0
-    return max(0.0, base_slippage_bps + impact_bps)
+    # Approximate constant-product AMM execution impact from two-sided USD
+    # liquidity. If reported liquidity is both sides of the pool, the quote
+    # reserve is roughly liquidity/2, so average execution impact is ~size/reserve.
+    # The old 100_000 multiplier overstated impact by about 5x and made realistic
+    # paper positions mechanically unprofitable.
+    quote_reserve_usd = max(liquidity_usd / 2.0, 1.0)
+    impact_bps = (notional_usd / quote_reserve_usd) * 10_000.0
+    return max(0.0, min(9_500.0, base_slippage_bps + impact_bps))
 
 
 def simulate_buy(

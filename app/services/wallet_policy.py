@@ -24,15 +24,21 @@ def policy_score(profile: SmartWalletProfile, copy: WalletCopyabilityV06 | None,
 
 
 def eligible(profile: SmartWalletProfile, copy: WalletCopyabilityV06 | None, settings: Settings) -> bool:
-    if (profile.score or 0.0) < settings.birdeye_min_wallet_score:
-        return False
     score = policy_score(profile, copy, settings)
+
+    # Keep the research/observation universe broader than the VERIFIED execution
+    # universe. A wallet can be useful evidence without being qualified to copy.
+    # The verified paper-copy module still enforces its own >=75 profile/trader
+    # floors and >=65 proven copyability score.
+    research_floor = max(0.0, min(100.0, float(settings.research_wallet_min_score)))
+    if score < research_floor:
+        return False
+
+    # Once enough forward evidence says AVOID, stop spending stream capacity on it.
     if copy is not None and copy.eligible_observations >= settings.copyability_min_observations:
-        return copy.copyability_tier != "AVOID" and score >= 60.0
-    # Unproven wallets are tracked only if the HFT-adjusted historical prior is
-    # still respectable; this lets the system collect forward evidence without
-    # wasting subscriptions on obvious market-maker/HFT noise.
-    return score >= 60.0
+        return copy.copyability_tier != "AVOID"
+
+    return True
 
 
 async def reconcile_wallets(settings: Settings) -> tuple[int, int]:

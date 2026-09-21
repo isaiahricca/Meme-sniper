@@ -604,12 +604,21 @@ async def x_social_status():
             select(func.count(func.distinct(XSocialSnapshotV074.token_mint)))
             .where(XSocialSnapshotV074.token_mint != "__GLOBAL__")
         )).scalar_one() or 0)
+        state = await session.get(SystemState, "v074_x_social_status")
+        runtime = {}
+        if state is not None:
+            try:
+                runtime = json.loads(state.value or "{}")
+            except Exception:
+                runtime = {}
         return {
             "configured": bool(settings.x_bearer_token),
             "enabled": settings.x_enabled,
             "covered_tokens": covered,
             "latest_at": latest.fetched_at.isoformat() if latest else None,
             "latest_score": latest.social_score if latest else None,
+            "runtime_status": runtime.get("status", "ok" if latest else "waiting"),
+            "runtime_error": runtime.get("error"),
         }
 
 
@@ -991,7 +1000,7 @@ async function refreshAll(){
  fetch('/api/overview').then(r=>r.json()),fetch('/api/tokens?limit=18').then(r=>r.json()),fetch('/api/signals?limit=18').then(r=>r.json()),fetch('/api/smart-wallets?limit=25').then(r=>r.json()),fetch('/api/copyability?limit=25').then(r=>r.json()),fetch('/api/wallet-swaps?limit=25').then(r=>r.json()),fetch('/api/paper-copy-trades?limit=25').then(r=>r.json()),fetch('/api/signal-trades?limit=25').then(r=>r.json()),fetch('/api/birdeye-status').then(r=>r.json()),fetch('/api/ai-ensemble?limit=25').then(r=>r.json()),fetch('/api/x-social-status').then(r=>r.json())]);
  document.getElementById('cards').innerHTML=[['Challenge equity P/L',money(o.shadow_signal.equity_pnl_usd)],['Realized',money(o.shadow_signal.pnl_usd)],['Open challenge',o.shadow_signal.open_trades],['Deployed',money(o.shadow_signal.open_notional_usd)],['Closed trades',o.shadow_signal.trades],['Challenge win',o.shadow_signal.win_rate_pct+'%'],['Challenge PF',o.shadow_signal.profit_factor??'—'],['Verified P/L',money(o.forward_pnl_usd)],['Wallets',o.tracked_wallets]].map(x=>`<div class="card"><div class="label">${x[0]}</div><div class="big">${x[1]}</div></div>`).join('');
  const g=o.challenge_gate||{}; document.getElementById('integrityLine').textContent=`AGGRESSIVE PAPER CHALLENGE: ${o.shadow_signal.open_trades} open / ${o.shadow_signal.trades} closed · realized ${money(o.shadow_signal.pnl_usd)} · unrealized ${money(o.shadow_signal.unrealized_pnl_usd)} · equity P/L ${money(o.shadow_signal.equity_pnl_usd)} · gates: ${g.market_eligible??0} market-ready, ${g.queued??0} queued, ${g.no_confirmation??0} no-confirm, ${g.score_below_entry??0} low-score, ${g.token_cooldown??0} cooldown · real-money OFF.`;
- const aiReady=(ai.openai_configured?'OpenAI '+ai.openai_model:'OpenAI NEEDS KEY')+' · '+(ai.claude_configured?'Claude '+ai.claude_model:'Claude NEEDS KEY');const xReady=xs.configured?'X SOCIAL ACTIVE':'X SOCIAL NEEDS BEARER TOKEN'; document.getElementById('aiStatusLine').textContent=`AI COMMITTEE: ${aiReady} · ${ai.total_decisions} decisions · ${ai.both_models_ok} dual-model responses · AI ENTRY GATE ${ai.ai_trade_gate?'ON':'OFF'} · ${xReady} · ${xs.covered_tokens||0} tokens enriched.`;
+ const aiReady=(ai.openai_configured?'OpenAI '+ai.openai_model:'OpenAI NEEDS KEY')+' · '+(ai.claude_configured?'Claude '+ai.claude_model:'Claude NEEDS KEY');const xReady=!xs.configured?'X SOCIAL NEEDS BEARER TOKEN':(xs.runtime_status==='error'?'X SOCIAL ERROR: '+(xs.runtime_error||'check API credits'):'X SOCIAL ACTIVE'); document.getElementById('aiStatusLine').textContent=`AI COMMITTEE: ${aiReady} · ${ai.total_decisions} decisions · ${ai.both_models_ok} dual-model responses · AI ENTRY GATE ${ai.ai_trade_gate?'ON':'OFF'} · ${xReady} · ${xs.covered_tokens||0} tokens enriched.`;
  document.getElementById('copyTrades').innerHTML=pc.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.wallet)}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.copy_tier||'—'}</td><td>${x.delay_s==null?'—':Number(x.delay_s).toFixed(1)+'s'}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('signalTrades').innerHTML=st.map(x=>`<tr><td>${x.id}</td><td class="mono">${short(x.mint)}</td><td>${x.status}</td><td>${x.integrity}</td><td>${x.score}</td><td>${money(x.notional_usd)}</td><td>${money(x.entry)}</td><td>${money(x.exit)}</td><td class="${(x.pnl_usd||0)>=0?'good':'bad'}">${x.pnl_pct==null?'—':pct(x.pnl_pct)}</td><td>${x.mfe==null?'—':pct(x.mfe)}</td><td>${x.mae==null?'—':pct(x.mae)}</td><td>${x.reason||'—'}</td></tr>`).join('');
  document.getElementById('aiDecisions').innerHTML=(ai.rows||[]).map(x=>`<tr><td>${x.signal_id}</td><td class="mono">${short(x.mint)}</td><td>${x.pre_entry?'YES':'NO'}</td><td>${x.openai_status==='ok'?(x.openai_verdict||'—'):x.openai_status}</td><td>${x.openai_confidence==null?'—':Number(x.openai_confidence).toFixed(0)+'%'}</td><td>${x.openai_edge==null?'—':pct(x.openai_edge)}</td><td>${x.claude_status==='ok'?(x.claude_verdict||'—'):x.claude_status}</td><td>${x.claude_confidence==null?'—':Number(x.claude_confidence).toFixed(0)+'%'}</td><td>${x.claude_edge==null?'—':pct(x.claude_edge)}</td><td>${x.consensus||'—'}</td><td class="${(x.trade_pnl_pct||0)>=0?'good':'bad'}">${x.trade_pnl_pct==null?'—':pct(x.trade_pnl_pct)}</td><td>${x.trade_reason||x.trade_status||'—'}</td></tr>`).join('');

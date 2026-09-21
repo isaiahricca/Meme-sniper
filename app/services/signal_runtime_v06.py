@@ -121,12 +121,21 @@ async def _queue_trade(
 ) -> bool:
     # V0.7.4 aggressive PAPER challenge. Entries still require on-chain smart-money
     # confirmation, but we no longer wait for an 88/100 raw signal that almost never fires.
-    effective_entry = max(float(settings.paper_entry_score), 68.0)
-    cluster_bonus = 0.0 if cluster_score is None else max(0.0, min(10.0, (float(cluster_score) - 60.0) * 0.25))
-    wallet_bonus = min(max(int(smart_wallet_buys), 0), 3) * 2.0
+    effective_entry = max(float(settings.paper_entry_score), 60.0)
+    cluster_bonus = 0.0 if cluster_score is None else max(0.0, min(12.0, (float(cluster_score) - 55.0) * 0.30))
+    wallet_bonus = min(max(int(smart_wallet_buys), 0), 4) * 2.5
     challenge_score = min(100.0, float(scored.total_score) + cluster_bonus + wallet_bonus)
-    confirmed = smart_wallet_buys >= 1 or (cluster_score is not None and float(cluster_score) >= 65.0)
-    if signal is None or not confirmed or challenge_score < effective_entry:
+
+    # Accept either explicit smart-money confirmation OR a strong independent
+    # market tape. This keeps the lane selective but prevents the 32-wallet
+    # tracked universe from freezing all paper activity.
+    smart_confirmed = smart_wallet_buys >= 1 or (cluster_score is not None and float(cluster_score) >= 60.0)
+    market_confirmed = (
+        float(scored.flow_score) >= 60.0
+        and float(scored.momentum_score) >= 52.0
+        and float(scored.liquidity_score) >= 8.0
+    )
+    if signal is None or not (smart_confirmed or market_confirmed) or challenge_score < effective_entry:
         return False
     existing = (
         await session.execute(
@@ -167,7 +176,7 @@ async def evaluate_signals(settings: Settings) -> int:
     recorded = 0
     async with SessionLocal() as session:
         tokens = list((await session.execute(
-            select(Token).order_by(Token.discovered_at.desc()).limit(60)
+            select(Token).order_by(Token.discovered_at.desc()).limit(120)
         )).scalars())
         cluster_cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
         clusters = list((await session.execute(
@@ -192,7 +201,7 @@ async def evaluate_signals(settings: Settings) -> int:
                     smart_wallet_buys=buys,
                     smart_wallet_sells=sells,
                 ),
-                entry_threshold=max(float(settings.paper_entry_score), 68.0),
+                entry_threshold=max(float(settings.paper_entry_score), 60.0),
             )
             sig = await _record_signal_if_changed(session, token, scored, settings)
             if sig is not None:
@@ -369,7 +378,7 @@ async def run_signal_runtime_v06(settings: Settings, stop: asyncio.Event) -> Non
         "Signal runtime active; mode=%s position=$%.0f entry>=%.1f max_open=%d TP=+%.1f%% SL=-%.1f%%",
         "AGGRESSIVE PAPER CHALLENGE" if settings.paper_signal_shadow_mode else "VERIFIED PAPER",
         settings.paper_position_usd,
-        max(float(settings.paper_entry_score), 68.0),
+        max(float(settings.paper_entry_score), 60.0),
         settings.paper_max_open_positions,
         settings.paper_take_profit_pct,
         settings.paper_stop_loss_pct,

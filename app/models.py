@@ -555,3 +555,38 @@ class AIEnsembleDecisionV074(Base):
 
     consensus: Mapped[str] = mapped_column(String(20), default="UNAVAILABLE", index=True)
     consensus_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class XSocialSnapshotV074(Base):
+    __tablename__ = "x_social_snapshots_v074"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_mint: Mapped[str] = mapped_column(String(100), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    query: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="ok", index=True)
+    post_count: Mapped[int] = mapped_column(Integer, default=0)
+    unique_authors: Mapped[int] = mapped_column(Integer, default=0)
+    verified_authors: Mapped[int] = mapped_column(Integer, default=0)
+    total_likes: Mapped[int] = mapped_column(Integer, default=0)
+    total_reposts: Mapped[int] = mapped_column(Integer, default=0)
+    total_replies: Mapped[int] = mapped_column(Integer, default=0)
+    total_quotes: Mapped[int] = mapped_column(Integer, default=0)
+    max_author_followers: Mapped[int] = mapped_column(Integer, default=0)
+    social_score: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    top_posts_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class PriceCandleV074(Base):
+    __tablename__ = "price_candles_v074"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_mint: Mapped[str] = mapped_column(String(100), index=True)
+    pair_address: Mapped[str] = mapped_column(String(100), index=True)
+    bucket_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    liquidity_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    samples: Mapped[int] = mapped_column(Integer, default=1)

@@ -415,7 +415,10 @@ async def run_ai_ensemble(settings: Settings, stop: asyncio.Event) -> None:
         while not stop.is_set():
             try:
                 if not settings.openai_api_key and not settings.anthropic_api_key:
-                    await asyncio.wait_for(stop.wait(), timeout=max(settings.ai_poll_seconds, 5.0))
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=max(settings.ai_poll_seconds, 5.0))
+                    except asyncio.TimeoutError:
+                        pass
                     continue
 
                 used = await _analyses_last_hour()

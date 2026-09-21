@@ -32,3 +32,14 @@ def test_round_trip_loses_money_when_market_flat():
     )
     proceeds = sell.notional_usd - sell.fee_usd
     assert proceeds < 100
+
+
+def test_constant_product_impact_is_not_five_times_overstated():
+    # $1k against $100k two-sided liquidity ~= 2% average AMM impact,
+    # plus the configured base execution allowance.
+    slip = estimate_slippage_bps(
+        notional_usd=1_000,
+        liquidity_usd=100_000,
+        base_slippage_bps=25,
+    )
+    assert 220 <= slip <= 230

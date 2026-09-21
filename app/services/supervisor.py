@@ -15,6 +15,8 @@ from app.services.nansen import run_nansen
 from app.services.rug_shield import run_rug_shield
 from app.services.trader_intelligence import run_trader_intelligence
 from app.services.ai_ensemble import run_ai_ensemble
+from app.services.x_social import run_x_social
+from app.services.candle_sampler import run_candle_sampler
 from app.services.forward_test import ensure_forward_epoch
 
 log = logging.getLogger("supervisor")
@@ -47,6 +49,8 @@ class Supervisor:
             run_nansen(self.settings, self.stop_event),
             run_trader_intelligence(self.settings, self.stop_event),
             run_ai_ensemble(self.settings, self.stop_event),
+            run_x_social(self.settings, self.stop_event),
+            run_candle_sampler(self.settings, self.stop_event),
         ]
         self.tasks = [asyncio.create_task(coro) for coro in runners]
         log.info("Started %d V0.7.4 intelligence services", len(self.tasks))

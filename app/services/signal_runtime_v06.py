@@ -10,6 +10,7 @@ from app.db import SessionLocal
 from app.models import (
     Token, Signal, WalletSwapV06, TokenPairState, PairLatestPrice,
     SignalMeasurementV06, SignalPaperTradeV06, SmartMoneyClusterV07, SystemState,
+    AIEnsembleDecisionV074,
 )
 from app.services.signal_engine import SignalInputs, score_signal
 from app.services.paper import simulate_buy, simulate_sell
@@ -177,6 +178,42 @@ async def _queue_trade(
         return False, "liquidity_too_shallow_for_min_size", challenge_score
     notional = min(float(settings.paper_position_usd), safe_notional)
 
+    # After 62 challenge trades showed clearly negative expectancy, new challenge
+    # entries require fresh agreement from BOTH independent AI analysts. This gate
+    # remains paper-only and does not affect management of positions already open.
+    if settings.ai_trade_gate_enabled:
+        ai_cutoff = now - timedelta(seconds=max(int(settings.ai_trade_gate_max_age_seconds), 30))
+        ai = (await session.execute(
+            select(AIEnsembleDecisionV074)
+            .where(
+                AIEnsembleDecisionV074.token_mint == token.mint,
+                AIEnsembleDecisionV074.created_at >= ai_cutoff,
+                AIEnsembleDecisionV074.pre_entry.is_(True),
+            )
+            .order_by(AIEnsembleDecisionV074.created_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        if ai is None or ai.openai_status != "ok" or ai.claude_status != "ok":
+            return False, "ai_pending", challenge_score
+        if ai.openai_verdict != "BUY" or ai.claude_verdict != "BUY":
+            return False, "ai_reject", challenge_score
+
+        confidence = min(float(ai.openai_confidence or 0.0), float(ai.claude_confidence or 0.0))
+        if confidence < float(settings.ai_trade_gate_min_confidence):
+            return False, "ai_low_confidence", challenge_score
+
+        estimated_round_trip_fee_pct = (float(settings.paper_fee_bps) * 2.0) / 100.0
+        quote_reserve = max(float(latest.liquidity_usd) / 2.0, 1.0)
+        impact_one_way_pct = (notional / quote_reserve) * 100.0
+        base_slip_one_way_pct = float(settings.paper_base_slippage_bps) / 100.0
+        friction_pct = estimated_round_trip_fee_pct + 2.0 * (impact_one_way_pct + base_slip_one_way_pct)
+        model_edge = min(
+            float(ai.openai_expected_edge_pct or -100.0),
+            float(ai.claude_expected_edge_pct or -100.0),
+        )
+        if model_edge < friction_pct + float(settings.ai_trade_gate_edge_buffer_pct):
+            return False, "ai_edge_below_cost", challenge_score
+
     # The entry clock starts when THIS cycle makes the decision, not when an old
     # signal row happened to be written. Reusing signal.ts caused silent expired
     # entry windows after restarts / unchanged scores.
@@ -214,6 +251,10 @@ async def evaluate_signals(settings: Settings) -> dict:
         "no_fresh_exact_pair": 0,
         "liquidity_below_min": 0,
         "liquidity_too_shallow_for_min_size": 0,
+        "ai_pending": 0,
+        "ai_reject": 0,
+        "ai_low_confidence": 0,
+        "ai_edge_below_cost": 0,
         "no_signal_record": 0,
     }
     async with SessionLocal() as session:

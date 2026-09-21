@@ -35,6 +35,9 @@ class Supervisor:
         log.info("Verified data epoch: %s", epoch.isoformat())
         forward = await ensure_forward_epoch(self.settings)
         log.info("V0.7.4 forward-test epoch: %s", forward.isoformat())
+        if self.settings.openai_api_key and self.settings.anthropic_api_key and self.settings.x_bearer_token:
+            ai_epoch = await ensure_named_epoch("v074_ai_x_regime_epoch")
+            log.info("V0.7.4 AI+X regime epoch: %s", ai_epoch.isoformat())
 
         runners = [
             run_pumpportal(self.settings, self.stop_event),

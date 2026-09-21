@@ -46,6 +46,25 @@ Return JSON only, with exactly these keys:
 }
 Do not return chain-of-thought or hidden reasoning. Keep the thesis and risks concise."""
 
+DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["BUY", "PASS"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+        "expected_edge_pct": {"type": "number"},
+        "suggested_stop_loss_pct": {"type": "number"},
+        "suggested_take_profit_pct": {"type": "number"},
+        "suggested_max_hold_seconds": {"type": "integer"},
+        "thesis": {"type": "string"},
+        "risks": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "verdict", "confidence", "expected_edge_pct", "suggested_stop_loss_pct",
+        "suggested_take_profit_pct", "suggested_max_hold_seconds", "thesis", "risks",
+    ],
+    "additionalProperties": False,
+}
+
 
 def aware(dt):
     if dt is None:
@@ -138,13 +157,29 @@ async def _ask_openai(http: httpx.AsyncClient, settings: Settings, packet: dict)
                     {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
                     {"role": "user", "content": [{"type": "input_text", "text": json.dumps(packet, separators=(",", ":"))}]},
                 ],
+                "reasoning": {"effort": "low"},
+                "text": {
+                    "verbosity": "low",
+                    "format": {
+                        "type": "json_schema",
+                        "name": "trade_committee_decision",
+                        "strict": True,
+                        "schema": DECISION_SCHEMA,
+                    },
+                },
                 "max_output_tokens": settings.ai_max_output_tokens,
             },
             timeout=settings.ai_request_timeout_seconds,
         )
         latency = (time.perf_counter() - started) * 1000.0
         if response.status_code >= 400:
-            return f"http_{response.status_code}", {"error": response.text[:300]}, latency
+            try:
+                err = response.json().get("error") or {}
+                code = str(err.get("code") or err.get("type") or "")[:80]
+                message = str(err.get("message") or "")[:220]
+            except Exception:
+                code, message = "", response.text[:220]
+            return f"http_{response.status_code}", {"error_code": code, "error": message}, latency
         obj = _normalize(_extract_json(_openai_text(response.json())))
         return "ok", obj, latency
     except Exception as exc:
@@ -319,18 +354,28 @@ async def _next_candidates(settings: Settings) -> list[int]:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=15)
     async with SessionLocal() as session:
+        recent_ai_mints = set((await session.execute(
+            select(AIEnsembleDecisionV074.token_mint)
+            .where(AIEnsembleDecisionV074.created_at >= cutoff)
+        )).scalars())
+
         stmt = (
             select(Signal)
             .where(
                 Signal.ts >= cutoff,
-                Signal.total_score >= settings.ai_candidate_min_score,
+                Signal.total_score >= max(settings.ai_candidate_min_score, 60.0),
+                Signal.decision == "PAPER_LONG",
             )
             .order_by(Signal.ts.desc())
-            .limit(80)
+            .limit(100)
         )
         rows = list((await session.execute(stmt)).scalars())
         out = []
+        seen_mints = set()
         for signal in rows:
+            if signal.token_mint in seen_mints or signal.token_mint in recent_ai_mints:
+                continue
+            seen_mints.add(signal.token_mint)
             if await session.get(AIEnsembleDecisionV074, signal.id) is not None:
                 continue
             risk = await session.get(TokenRiskV072, signal.token_mint)
@@ -388,9 +433,10 @@ async def _analyze_signal(signal_id: int, settings: Settings, http: httpx.AsyncC
         await session.commit()
 
     log.info(
-        "AI ensemble signal=%s token=%s OA=%s/%s Claude=%s/%s consensus=%s pre_entry=%s",
+        "AI ensemble signal=%s token=%s OA=%s/%s(%s) Claude=%s/%s(%s) consensus=%s pre_entry=%s",
         signal_id, packet["market"]["mint"][:10],
-        oa_status, oa.get("verdict"), cl_status, cl.get("verdict"),
+        oa_status, oa.get("verdict"), oa.get("error_code") or "-",
+        cl_status, cl.get("verdict"), cl.get("error_code") or "-",
         consensus, pre_entry,
     )
     return True

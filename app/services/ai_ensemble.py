@@ -434,6 +434,25 @@ async def _next_candidates(settings: Settings) -> list[int]:
             risk = await session.get(TokenRiskV072, signal.token_mint)
             if risk is not None and risk.hard_block:
                 continue
+
+            market_confirmed = (
+                float(signal.flow_score or 0.0) >= 60.0
+                and float(signal.momentum_score or 0.0) >= 52.0
+                and float(signal.liquidity_score or 0.0) >= 8.0
+            )
+            cluster = (await session.execute(
+                select(SmartMoneyClusterV07)
+                .where(
+                    SmartMoneyClusterV07.token_mint == signal.token_mint,
+                    SmartMoneyClusterV07.last_seen_at >= now - timedelta(minutes=2),
+                    SmartMoneyClusterV07.cluster_score >= 60.0,
+                )
+                .order_by(SmartMoneyClusterV07.last_seen_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+            if not market_confirmed and cluster is None:
+                continue
+
             out.append(signal.id)
             if len(out) >= settings.ai_max_candidates_per_cycle:
                 break
@@ -522,12 +541,33 @@ async def run_ai_ensemble(settings: Settings, stop: asyncio.Event) -> None:
 
                 used = await _analyses_last_hour()
                 remaining = max(int(settings.ai_max_analyses_per_hour) - used, 0)
-                if remaining > 0:
+                min_interval = max(30.0, 3600.0 / max(int(settings.ai_max_analyses_per_hour), 1))
+                can_call = remaining > 0
+                async with SessionLocal() as session:
+                    last_row = await session.get(SystemState, "v074_ai_last_call_at")
+                    if last_row is not None:
+                        try:
+                            last_call = datetime.fromisoformat(last_row.value)
+                            if last_call.tzinfo is None:
+                                last_call = last_call.replace(tzinfo=timezone.utc)
+                            can_call = can_call and (datetime.now(timezone.utc) - last_call).total_seconds() >= min_interval
+                        except Exception:
+                            pass
+
+                if can_call:
                     candidates = await _next_candidates(settings)
-                    for signal_id in candidates[:remaining]:
+                    for signal_id in candidates[:1]:
                         if stop.is_set():
                             return
-                        await _analyze_signal(signal_id, settings, http)
+                        if await _analyze_signal(signal_id, settings, http):
+                            async with SessionLocal() as session:
+                                now_iso = datetime.now(timezone.utc).isoformat()
+                                row = await session.get(SystemState, "v074_ai_last_call_at")
+                                if row is None:
+                                    session.add(SystemState(key="v074_ai_last_call_at", value=now_iso))
+                                else:
+                                    row.value = now_iso
+                                await session.commit()
 
                 async with SessionLocal() as session:
                     state = await session.get(SystemState, "v074_ai_ensemble_status")

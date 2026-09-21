@@ -132,17 +132,25 @@ async def _queue_trade(
     smart_confirmed = smart_wallet_buys >= 1 or (
         cluster_score is not None and float(cluster_score) >= 60.0
     )
+    # Confirmation must not become a second, stricter entry score. A candidate
+    # can qualify either through fresh smart-money evidence or through broad
+    # market participation. The previous flow>=60 AND momentum>=52 gate blocked
+    # ~95% of otherwise eligible pairs before their challenge score was even
+    # evaluated, starving the paper test of observations.
     market_confirmed = (
-        float(scored.flow_score) >= 60.0
-        and float(scored.momentum_score) >= 52.0
+        float(scored.flow_score) >= 52.0
+        and float(scored.momentum_score) >= 45.0
         and float(scored.liquidity_score) >= 8.0
     )
     if signal is None:
         return False, "no_signal_record", challenge_score
-    if not (smart_confirmed or market_confirmed):
-        return False, "no_confirmation", challenge_score
+    # Keep the actual entry threshold authoritative. Weak candidates still fail
+    # score_below_entry; this change only prevents confirmation from duplicating
+    # the score gate. Rug/liquidity/AI gates below remain unchanged.
     if challenge_score < effective_entry:
         return False, "score_below_entry", challenge_score
+    if not (smart_confirmed or market_confirmed):
+        return False, "no_confirmation", challenge_score
 
     now = datetime.now(timezone.utc)
     cooldown_start = now - timedelta(seconds=max(int(settings.paper_signal_reentry_cooldown_seconds), 0))

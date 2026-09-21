@@ -382,9 +382,9 @@ async def _analyses_last_hour() -> int:
     cutoff = now - timedelta(hours=1)
     async with SessionLocal() as session:
         # Start a clean paid-committee accounting epoch after both providers were funded.
-        state = await session.get(SystemState, "v074_ai_paid_epoch_v2")
+        state = await session.get(SystemState, "v074_ai_paid_epoch_v3")
         if state is None:
-            state = SystemState(key="v074_ai_paid_epoch_v2", value=now.isoformat())
+            state = SystemState(key="v074_ai_paid_epoch_v3", value=now.isoformat())
             session.add(state)
             await session.commit()
             epoch = now
@@ -404,21 +404,22 @@ async def _analyses_last_hour() -> int:
 
 async def _next_candidates(settings: Settings) -> list[int]:
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(minutes=15)
+    signal_cutoff = now - timedelta(minutes=15)
+    retry_cutoff = now - timedelta(seconds=max(int(settings.ai_trade_gate_max_age_seconds), 60))
     async with SessionLocal() as session:
         recent_ai_mints = set((await session.execute(
             select(AIEnsembleDecisionV074.token_mint)
-            .where(AIEnsembleDecisionV074.created_at >= cutoff)
+            .where(AIEnsembleDecisionV074.created_at >= retry_cutoff)
         )).scalars())
 
         stmt = (
             select(Signal)
             .where(
-                Signal.ts >= cutoff,
+                Signal.ts >= signal_cutoff,
                 Signal.total_score >= max(settings.ai_candidate_min_score, 60.0),
                 Signal.decision == "PAPER_LONG",
             )
-            .order_by(Signal.ts.desc())
+            .order_by(Signal.total_score.desc(), Signal.ts.desc())
             .limit(100)
         )
         rows = list((await session.execute(stmt)).scalars())

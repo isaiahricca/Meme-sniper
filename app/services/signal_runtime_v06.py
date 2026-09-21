@@ -8,7 +8,7 @@ from app.config import Settings
 from app.db import SessionLocal
 from app.models import (
     Token, Signal, WalletSwapV06, TokenPairState, PairLatestPrice,
-    SignalMeasurementV06, SignalPaperTradeV06,
+    SignalMeasurementV06, SignalPaperTradeV06, SmartMoneyClusterV07,
 )
 from app.services.signal_engine import SignalInputs, score_signal
 from app.services.paper import simulate_buy, simulate_sell
@@ -115,9 +115,18 @@ async def _active_count(session) -> int:
     )).scalars()))
 
 
-async def _queue_trade(session, token: Token, signal: Signal | None, scored, settings: Settings) -> bool:
-    effective_entry = max(float(settings.paper_entry_score), 88.0)
-    if signal is None or scored.total_score < effective_entry:
+async def _queue_trade(
+    session, token: Token, signal: Signal | None, scored, settings: Settings,
+    smart_wallet_buys: int = 0, cluster_score: float | None = None,
+) -> bool:
+    # V0.7.4 aggressive PAPER challenge. Entries still require on-chain smart-money
+    # confirmation, but we no longer wait for an 88/100 raw signal that almost never fires.
+    effective_entry = max(float(settings.paper_entry_score), 68.0)
+    cluster_bonus = 0.0 if cluster_score is None else max(0.0, min(10.0, (float(cluster_score) - 60.0) * 0.25))
+    wallet_bonus = min(max(int(smart_wallet_buys), 0), 3) * 2.0
+    challenge_score = min(100.0, float(scored.total_score) + cluster_bonus + wallet_bonus)
+    confirmed = smart_wallet_buys >= 1 or (cluster_score is not None and float(cluster_score) >= 65.0)
+    if signal is None or not confirmed or challenge_score < effective_entry:
         return False
     existing = (
         await session.execute(
@@ -147,7 +156,7 @@ async def _queue_trade(session, token: Token, signal: Signal | None, scored, set
         integrity_status="shadow_pending" if settings.paper_signal_shadow_mode else "pending",
         notional_usd=settings.paper_position_usd,
         fees_usd=0.0,
-        entry_score=scored.total_score,
+        entry_score=challenge_score,
         max_favourable_pct=0.0,
         max_adverse_pct=0.0,
     ))
@@ -160,6 +169,16 @@ async def evaluate_signals(settings: Settings) -> int:
         tokens = list((await session.execute(
             select(Token).order_by(Token.discovered_at.desc()).limit(60)
         )).scalars())
+        cluster_cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
+        clusters = list((await session.execute(
+            select(SmartMoneyClusterV07)
+            .where(SmartMoneyClusterV07.last_seen_at >= cluster_cutoff)
+            .order_by(SmartMoneyClusterV07.last_seen_at.desc())
+            .limit(200)
+        )).scalars())
+        cluster_by_mint = {}
+        for cluster in clusters:
+            cluster_by_mint.setdefault(cluster.token_mint, cluster)
         for token in tokens:
             if not token.price_usd or not token.liquidity_usd or token.liquidity_usd < settings.min_liquidity_usd:
                 continue
@@ -173,12 +192,17 @@ async def evaluate_signals(settings: Settings) -> int:
                     smart_wallet_buys=buys,
                     smart_wallet_sells=sells,
                 ),
-                entry_threshold=max(float(settings.paper_entry_score), 88.0),
+                entry_threshold=max(float(settings.paper_entry_score), 68.0),
             )
             sig = await _record_signal_if_changed(session, token, scored, settings)
             if sig is not None:
                 recorded += 1
-                await _queue_trade(session, token, sig, scored, settings)
+                cluster = cluster_by_mint.get(token.mint)
+                cluster_score = float(cluster.cluster_score) if cluster is not None else None
+                await _queue_trade(
+                    session, token, sig, scored, settings,
+                    smart_wallet_buys=buys, cluster_score=cluster_score,
+                )
         await session.commit()
     return recorded
 
@@ -277,9 +301,12 @@ async def _manage_open(settings: Settings) -> tuple[int, int]:
             )).scalar_one_or_none()
             reason = None
             _risk_ok, risk_reason, _risk = await risk_gate(session, row.token_mint, settings)
+            trailing_active = (row.max_favourable_pct or 0.0) >= max(float(settings.paper_copy_trailing_activate_pct), 8.0)
+            trailing_hit = trailing_active and mark <= (row.max_favourable_pct or 0.0) - max(float(settings.paper_copy_trailing_retrace_pct), 3.0)
             if risk_reason == "rug_shield_block": reason = "rug_shield_emergency"
             elif mark <= -settings.paper_stop_loss_pct: reason = "stop_loss"
             elif mark >= settings.paper_take_profit_pct: reason = "take_profit"
+            elif trailing_hit: reason = "trailing_profit"
             elif latest_sig and latest_sig.total_score <= settings.paper_exit_score: reason = "signal_deterioration"
             elif exit_due and snap >= exit_due: reason = "max_hold"
             if not reason: continue
@@ -338,7 +365,15 @@ async def _capture_measurements(settings: Settings) -> tuple[int, int]:
 
 
 async def run_signal_runtime_v06(settings: Settings, stop: asyncio.Event) -> None:
-    log.info("Signal runtime active; mode=%s", "SHADOW" if settings.paper_signal_shadow_mode else "VERIFIED PAPER")
+    log.info(
+        "Signal runtime active; mode=%s position=$%.0f entry>=%.1f max_open=%d TP=+%.1f%% SL=-%.1f%%",
+        "AGGRESSIVE PAPER CHALLENGE" if settings.paper_signal_shadow_mode else "VERIFIED PAPER",
+        settings.paper_position_usd,
+        max(float(settings.paper_entry_score), 68.0),
+        settings.paper_max_open_positions,
+        settings.paper_take_profit_pct,
+        settings.paper_stop_loss_pct,
+    )
     while not stop.is_set():
         try:
             recorded = await evaluate_signals(settings)

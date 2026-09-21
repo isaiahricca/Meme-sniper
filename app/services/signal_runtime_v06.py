@@ -217,9 +217,19 @@ async def evaluate_signals(settings: Settings) -> dict:
         "no_signal_record": 0,
     }
     async with SessionLocal() as session:
-        tokens = list((await session.execute(
-            select(Token).order_by(Token.discovered_at.desc()).limit(120)
+        active_states = list((await session.execute(
+            select(TokenPairState)
+            .where(TokenPairState.status == "active")
+            .order_by(TokenPairState.last_verified_at.desc())
+            .limit(settings.market_max_active_pairs)
         )).scalars())
+        active_mints = [s.token_mint for s in active_states]
+        token_map = {
+            t.mint: t for t in (await session.execute(
+                select(Token).where(Token.mint.in_(active_mints))
+            )).scalars()
+        } if active_mints else {}
+        tokens = [token_map[m] for m in active_mints if m in token_map]
         cluster_cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
         clusters = list((await session.execute(
             select(SmartMoneyClusterV07)

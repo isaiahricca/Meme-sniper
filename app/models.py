@@ -524,3 +524,31 @@ class TokenRiskV072(Base):
     previous_liquidity_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     liquidity_drop_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class AIEnsembleDecisionV074(Base):
+    __tablename__ = "ai_ensemble_decisions_v074"
+
+    signal_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_mint: Mapped[str] = mapped_column(String(100), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    packet_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    openai_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    openai_model: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    openai_verdict: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    openai_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    openai_expected_edge_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    openai_json: Mapped[str] = mapped_column(Text, default="{}")
+    openai_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    claude_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    claude_model: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    claude_verdict: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    claude_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    claude_expected_edge_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    claude_json: Mapped[str] = mapped_column(Text, default="{}")
+    claude_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    consensus: Mapped[str] = mapped_column(String(20), default="UNAVAILABLE", index=True)
+    consensus_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)

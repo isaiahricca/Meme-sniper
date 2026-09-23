@@ -201,13 +201,33 @@ async def _queue_trade(
             .order_by(AIEnsembleDecisionV074.created_at.desc())
             .limit(1)
         )).scalar_one_or_none()
-        if ai is None or ai.openai_status != "ok" or ai.claude_status != "ok":
+        if ai is None:
             return False, "ai_pending", challenge_score
-        if ai.openai_verdict != "BUY" or ai.claude_verdict != "BUY":
-            return False, "ai_reject", challenge_score
 
-        confidence = min(float(ai.openai_confidence or 0.0), float(ai.claude_confidence or 0.0))
-        if confidence < float(settings.ai_trade_gate_min_confidence):
+        # Provider failures must degrade gracefully rather than freeze the whole
+        # strategy. Two healthy models still require BUY/BUY. If only one provider
+        # is healthy, require a stricter confidence and after-cost edge from it.
+        oa_ok = ai.openai_status == "ok"
+        cl_ok = ai.claude_status == "ok"
+        if not oa_ok and not cl_ok:
+            return False, "ai_pending", challenge_score
+        if oa_ok and cl_ok:
+            if ai.openai_verdict != "BUY" or ai.claude_verdict != "BUY":
+                return False, "ai_reject", challenge_score
+            confidence = min(float(ai.openai_confidence or 0.0), float(ai.claude_confidence or 0.0))
+            model_edge = min(float(ai.openai_expected_edge_pct or -100.0), float(ai.claude_expected_edge_pct or -100.0))
+            confidence_floor = float(settings.ai_trade_gate_min_confidence)
+            edge_buffer = float(settings.ai_trade_gate_edge_buffer_pct)
+        else:
+            verdict = ai.openai_verdict if oa_ok else ai.claude_verdict
+            confidence = float(ai.openai_confidence or 0.0) if oa_ok else float(ai.claude_confidence or 0.0)
+            model_edge = float(ai.openai_expected_edge_pct or -100.0) if oa_ok else float(ai.claude_expected_edge_pct or -100.0)
+            if verdict != "BUY":
+                return False, "ai_reject", challenge_score
+            confidence_floor = max(float(settings.ai_trade_gate_min_confidence), 75.0)
+            edge_buffer = max(float(settings.ai_trade_gate_edge_buffer_pct), 1.5)
+
+        if confidence < confidence_floor:
             return False, "ai_low_confidence", challenge_score
 
         estimated_round_trip_fee_pct = (float(settings.paper_fee_bps) * 2.0) / 100.0
@@ -215,11 +235,7 @@ async def _queue_trade(
         impact_one_way_pct = (notional / quote_reserve) * 100.0
         base_slip_one_way_pct = float(settings.paper_base_slippage_bps) / 100.0
         friction_pct = estimated_round_trip_fee_pct + 2.0 * (impact_one_way_pct + base_slip_one_way_pct)
-        model_edge = min(
-            float(ai.openai_expected_edge_pct or -100.0),
-            float(ai.claude_expected_edge_pct or -100.0),
-        )
-        if model_edge < friction_pct + float(settings.ai_trade_gate_edge_buffer_pct):
+        if model_edge < friction_pct + edge_buffer:
             return False, "ai_edge_below_cost", challenge_score
 
     # Reject obvious late/chase entries. The old strategy could buy after a sharp

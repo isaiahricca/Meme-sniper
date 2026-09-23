@@ -222,6 +222,17 @@ async def _queue_trade(
         if model_edge < friction_pct + float(settings.ai_trade_gate_edge_buffer_pct):
             return False, "ai_edge_below_cost", challenge_score
 
+    # Reject obvious late/chase entries. The old strategy could buy after a sharp
+    # 5-minute run and then pay ~3.5% round-trip friction on top, which is a very
+    # effective machine for manufacturing losses.
+    m5 = float(latest.price_change_m5_pct or 0.0)
+    if m5 < 1.0 or m5 > 12.0:
+        return False, "momentum_window", challenge_score
+    buys_m5 = int(latest.buys_m5 or 0)
+    sells_m5 = int(latest.sells_m5 or 0)
+    if buys_m5 + sells_m5 < 8 or buys_m5 <= sells_m5:
+        return False, "weak_live_flow", challenge_score
+
     # The entry clock starts when THIS cycle makes the decision, not when an old
     # signal row happened to be written. Reusing signal.ts caused silent expired
     # entry windows after restarts / unchanged scores.
@@ -263,6 +274,8 @@ async def evaluate_signals(settings: Settings) -> dict:
         "ai_reject": 0,
         "ai_low_confidence": 0,
         "ai_edge_below_cost": 0,
+        "momentum_window": 0,
+        "weak_live_flow": 0,
         "no_signal_record": 0,
     }
     async with SessionLocal() as session:
@@ -448,10 +461,18 @@ async def _manage_open(settings: Settings) -> tuple[int, int]:
             trailing_active = (row.max_favourable_pct or 0.0) >= max(float(settings.paper_copy_trailing_activate_pct), 8.0)
             trailing_hit = trailing_active and mark <= (row.max_favourable_pct or 0.0) - max(float(settings.paper_copy_trailing_retrace_pct), 3.0)
             if risk_reason == "rug_shield_block": reason = "rug_shield_emergency"
-            elif mark <= -settings.paper_stop_loss_pct: reason = "stop_loss"
-            elif mark >= settings.paper_take_profit_pct: reason = "take_profit"
-            elif trailing_hit: reason = "trailing_profit"
-            elif latest_sig and latest_sig.total_score <= settings.paper_exit_score: reason = "signal_deterioration"
+            # Protect winners before they turn into losers. The previous +35/-12
+            # payoff targets were badly mismatched to a five-minute memecoin lane.
+            # These are fixed, pre-declared rules for the next clean paper epoch,
+            # not thresholds fitted to individual historical trades.
+            mfe = float(row.max_favourable_pct or 0.0)
+            if risk_reason == "rug_shield_block": reason = "rug_shield_emergency"
+            elif mark <= -5.0: reason = "stop_loss"
+            elif mark >= 10.0: reason = "take_profit"
+            elif mfe >= 5.0 and mark <= max(1.0, mfe - 2.5): reason = "trailing_profit"
+            elif mfe >= 2.5 and mark <= 0.5: reason = "breakeven_protect"
+            elif latest_sig and latest_sig.total_score <= max(float(settings.paper_exit_score), 50.0): reason = "signal_deterioration"
+            elif row.opened_at and (snap - aware(row.opened_at)).total_seconds() >= 180: reason = "time_stop"
             elif exit_due and snap >= exit_due: reason = "max_hold"
             if not reason: continue
             if latest.liquidity_usd is None or latest.liquidity_usd <= 0:

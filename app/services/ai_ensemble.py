@@ -215,6 +215,10 @@ async def _ask_claude(http: httpx.AsyncClient, settings: Settings, packet: dict)
         )
         latency = (time.perf_counter() - started) * 1000.0
         if response.status_code >= 400:
+            # Anthropic model aliases change over time. A bad/missing model must
+            # not disable the trading committee. Keep the failure visible in the
+            # research row, but let the signal lane use the healthy OpenAI model
+            # under its existing confidence + after-cost edge requirements.
             return f"http_{response.status_code}", {"error": response.text[:300]}, latency
         obj = _normalize(_extract_json(_claude_text(response.json())))
         return "ok", obj, latency

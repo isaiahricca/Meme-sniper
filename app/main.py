@@ -5,7 +5,7 @@ import time
 import base64
 import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import uvicorn
 import httpx
@@ -576,12 +576,19 @@ async def candle_watchlist(limit: int = 24):
 
 
 @app.get("/api/candles")
-async def candles(mint: str = Query(..., min_length=20, max_length=100), limit: int = 120):
+async def candles(mint: str = Query(..., min_length=20, max_length=100), limit: int = 120,
+                  pair_address: str | None = None):
     limit = min(max(limit, 10), 180)
     async with SessionLocal() as session:
+        if pair_address is None:
+            state = await session.get(TokenPairState, mint)
+            pair_address = state.pair_address if state else (await session.execute(
+                select(PriceCandleV074.pair_address).where(PriceCandleV074.token_mint == mint)
+                .order_by(PriceCandleV074.bucket_at.desc()).limit(1)
+            )).scalar_one_or_none()
         rows = list((await session.execute(
             select(PriceCandleV074)
-            .where(PriceCandleV074.token_mint == mint)
+            .where(PriceCandleV074.token_mint == mint, PriceCandleV074.pair_address == pair_address)
             .order_by(PriceCandleV074.bucket_at.desc())
             .limit(limit)
         )).scalars())
@@ -590,6 +597,8 @@ async def candles(mint: str = Query(..., min_length=20, max_length=100), limit: 
             "t": r.bucket_at.isoformat(),
             "o": r.open, "h": r.high, "l": r.low, "c": r.close,
             "liquidity": r.liquidity_usd, "samples": r.samples,
+            "pair_address": r.pair_address,
+            "sample_type": "sampled_receipt_prices",
         } for r in rows]
 
 
@@ -683,6 +692,7 @@ async def ai_ensemble(limit: int = 25):
                 "claude_verdict": r.claude_verdict,
                 "claude_confidence": r.claude_confidence,
                 "claude_edge": r.claude_expected_edge_pct,
+                "claude_diagnostic": _provider_diagnostic(r.claude_json) if r.claude_status != "ok" else None,
                 "consensus": r.consensus,
                 "consensus_confidence": r.consensus_confidence,
                 "trade_status": trades[r.signal_id].status if r.signal_id in trades else None,
@@ -690,6 +700,54 @@ async def ai_ensemble(limit: int = 25):
                 "trade_reason": trades[r.signal_id].exit_reason if r.signal_id in trades else None,
             } for r in rows],
         }
+
+
+def _provider_diagnostic(raw):
+    try:
+        data = json.loads(raw or "{}")
+        result = {key: str(data.get(key) or "")[:500]
+                  for key in ("error_code", "error", "request_id")}
+        for secret in (settings.anthropic_api_key, settings.openai_api_key):
+            if secret:
+                result = {key: value.replace(secret, "[REDACTED]") for key, value in result.items()}
+        return result
+    except (ValueError, AttributeError):
+        return {"error": "Stored diagnostic could not be decoded"}
+
+
+@app.get("/api/data-integrity")
+async def data_integrity():
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=1)
+    result = {"as_of": now.isoformat(), "window": "due within the last hour",
+              "price_freshness_basis": "HTTP receipt time; upstream update time unavailable",
+              "measurements": {}, "unresolved_exposure": {}}
+    async with SessionLocal() as session:
+        health_row = await session.get(SystemState, "helius_stream_health")
+        try:
+            result["helius"] = json.loads(health_row.value) if health_row else None
+        except ValueError:
+            result["helius"] = None
+        for name, model in (("signal", SignalMeasurementV06), ("wallet", WalletSwapMeasurementV06)):
+            groups = (await session.execute(select(
+                model.integrity_status, model.invalid_reason, func.count(model.id)
+            ).where(model.due_at >= cutoff, model.due_at <= now)
+             .group_by(model.integrity_status, model.invalid_reason))).all()
+            counts = [{"status": s, "reason": r, "count": n} for s, r, n in groups]
+            resolved = sum(n for s, _, n in groups if s != "pending")
+            valid = sum(n for s, _, n in groups if s == "valid")
+            result["measurements"][name] = {
+                "counts": counts, "resolved": resolved,
+                "valid_pct_of_resolved": round(100 * valid / resolved, 2) if resolved else None,
+                "pending": sum(n for s, _, n in groups if s == "pending"),
+            }
+        for name, model in (("signal", SignalPaperTradeV06), ("wallet", PaperCopyTradeV06)):
+            count, notional = (await session.execute(select(
+                func.count(model.id), func.coalesce(func.sum(model.notional_usd), 0)
+            ).where(model.status == "invalid", model.qty > 0))).one()
+            result["unresolved_exposure"][name] = {"trades": count, "original_notional_usd": notional,
+                "note": "Filled positions without valid realized P/L; original notional is not a loss estimate."}
+    return result
 
 
 @app.get("/api/birdeye-status")

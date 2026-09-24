@@ -1,6 +1,10 @@
+import math
+
+
 def as_float(value, default=0.0) -> float:
     try:
-        return float(value if value is not None else default)
+        result = float(value if value is not None else default)
+        return result if math.isfinite(result) else default
     except (TypeError, ValueError):
         return default
 

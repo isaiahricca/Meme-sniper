@@ -60,6 +60,11 @@ async def init_db() -> None:
         # table, which matters because Railway keeps /data across deploys.
         if settings.database_url.startswith("sqlite+aiosqlite"):
             def _migrate_sqlite(sync_conn):
+                candle_columns = {r[1] for r in sync_conn.exec_driver_sql(
+                    "PRAGMA table_info(price_candles_v074)"
+                ).fetchall()}
+                if candle_columns and "last_observed_at" not in candle_columns:
+                    sync_conn.exec_driver_sql("ALTER TABLE price_candles_v074 ADD COLUMN last_observed_at DATETIME")
                 rows = sync_conn.exec_driver_sql(
                     "PRAGMA table_info(ai_ensemble_decisions_v074)"
                 ).fetchall()

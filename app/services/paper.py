@@ -1,4 +1,15 @@
 from dataclasses import dataclass
+import math
+
+
+def _validate_fill(market_price, size, liquidity_usd, fee_bps, base_slippage_bps):
+    values = (market_price, size, liquidity_usd, fee_bps, base_slippage_bps)
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError("fill inputs must be finite")
+    if market_price <= 0 or size <= 0 or liquidity_usd <= 0:
+        raise ValueError("price, size and liquidity must be positive")
+    if not 0 <= fee_bps < 10_000 or not 0 <= base_slippage_bps < 10_000:
+        raise ValueError("fee and slippage must be in [0, 10000) basis points")
 
 
 @dataclass(frozen=True)
@@ -17,8 +28,7 @@ def estimate_slippage_bps(
     liquidity_usd: float,
     base_slippage_bps: float,
 ) -> float:
-    if liquidity_usd <= 0:
-        return 10_000.0
+    _validate_fill(1.0, notional_usd, liquidity_usd, 0.0, base_slippage_bps)
     # Approximate constant-product AMM execution impact from two-sided USD
     # liquidity. If reported liquidity is both sides of the pool, the quote
     # reserve is roughly liquidity/2, so average execution impact is ~size/reserve.
@@ -37,8 +47,7 @@ def simulate_buy(
     fee_bps: float,
     base_slippage_bps: float,
 ) -> Fill:
-    if market_price <= 0 or notional_usd <= 0:
-        raise ValueError("market_price and notional_usd must be positive")
+    _validate_fill(market_price, notional_usd, liquidity_usd, fee_bps, base_slippage_bps)
 
     slippage = estimate_slippage_bps(
         notional_usd=notional_usd,
@@ -61,8 +70,7 @@ def simulate_sell(
     fee_bps: float,
     base_slippage_bps: float,
 ) -> Fill:
-    if market_price <= 0 or qty <= 0:
-        raise ValueError("market_price and qty must be positive")
+    _validate_fill(market_price, qty, liquidity_usd, fee_bps, base_slippage_bps)
 
     gross = market_price * qty
     slippage = estimate_slippage_bps(

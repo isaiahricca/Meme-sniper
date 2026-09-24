@@ -13,6 +13,7 @@ from app.models import (
 )
 from app.services.smart_money import hft_penalty, copyability_tier
 from app.services.copyability_math import observed_edge_score, combine_score, classify_return
+from app.services.measurement_prices import first_observation
 
 log = logging.getLogger("verified_copyability")
 
@@ -61,7 +62,7 @@ async def _initialize_pending_swaps(settings: Settings) -> tuple[int, int]:
                 snap_ts = aware(latest.ts)
                 usable = bool(
                     snap_ts is not None
-                    and swap_ts <= snap_ts <= deadline
+                    and swap_ts <= snap_ts <= min(deadline, now)
                     and latest.source == "dexscreener_exact_pair"
                     and latest.base_mint == swap.token_mint
                     and latest.price_usd > 0
@@ -140,7 +141,7 @@ async def _capture_due(settings: Settings) -> tuple[int, int]:
             due = aware(row.due_at)
             if due is None or due > now:
                 continue
-            latest = await session.get(PairLatestPrice, row.pair_address)
+            latest = await first_observation(session, row.pair_address, due, now)
             if latest is None:
                 if now > due + timedelta(seconds=settings.copyability_capture_grace_seconds):
                     row.captured_at = now
@@ -151,7 +152,7 @@ async def _capture_due(settings: Settings) -> tuple[int, int]:
                 continue
 
             snap_ts = aware(latest.ts)
-            if snap_ts is None or snap_ts < due:
+            if snap_ts is None or snap_ts < due or snap_ts > now:
                 if now > due + timedelta(seconds=settings.copyability_capture_grace_seconds):
                     row.captured_at = now
                     row.integrity_status = "invalid"

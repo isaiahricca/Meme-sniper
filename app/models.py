@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Float, Integer, DateTime, Text, Boolean
+from sqlalchemy import String, Float, Integer, DateTime, Text, Boolean, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -281,6 +281,20 @@ class PairLatestPrice(Base):
     sells_m5: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     source: Mapped[str] = mapped_column(String(60), default="dexscreener_exact_pair")
+
+
+class PairPriceObservation(Base):
+    """Short-lived exact-pair receipts; captured measurements retain their prices."""
+    __tablename__ = "pair_price_observations"
+    __table_args__ = (Index("ix_observation_pair_ts", "pair_address", "ts"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    pair_address: Mapped[str] = mapped_column(String(100))
+    base_mint: Mapped[str] = mapped_column(String(80))
+    price_usd: Mapped[float] = mapped_column(Float)
+    liquidity_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source: Mapped[str] = mapped_column(String(60))
 
 
 class WalletSwapV06(Base):
@@ -590,3 +604,4 @@ class PriceCandleV074(Base):
     close: Mapped[float] = mapped_column(Float)
     liquidity_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     samples: Mapped[int] = mapped_column(Integer, default=1)
+    last_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

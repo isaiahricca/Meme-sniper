@@ -16,6 +16,8 @@ This change repairs collection and validation defects in the existing V0.7.4 pip
 
 ## Schema and storage
 
+Startup now creates and verifies a one-time SQLite restore point beside the database at `backups/before-integrity-repair-20260925.sqlite`, before schema initialization or service writers start. It uses SQLite's online backup API, including committed WAL contents. Low disk space or backup validation failure prevents migration. This requires no Railway backup-plan feature. The copy shares the original volume, so it protects against migration mistakes, not loss of the entire volume. Existing verified restore points are never overwritten.
+
 Adds `pair_price_observations` with a pair/time index and nullable `price_candles_v074.last_observed_at`. SQLite startup migration is additive and idempotent. Existing trades, decisions, measurements and strategy epochs are preserved. PostgreSQL installations must add the nullable candle timestamp column before deploying; this repository's production target uses SQLite.
 
 Every 30 seconds maintenance removes at most 5,000 old raw events and 5,000 old receipt rows per table. Retention thresholds are six hours and ten minutes respectively. This is bounded cleanup, not a disk-quota guarantee. At sustained ingestion beyond cleanup throughput, or during downtime, backlog can grow. No automatic VACUUM is introduced.

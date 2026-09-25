@@ -23,6 +23,7 @@ from app.models import (
     AIEnsembleDecisionV074, XSocialSnapshotV074, PriceCandleV074,
 )
 from app.services.supervisor import Supervisor
+from app.services.startup_backup import backup_before_integrity_upgrade
 from app.services.performance import build_performance, verified_epoch
 from app.services.forward_test import shadow_signal_summary, ai_x_regime_summary, copy_daily_circuit_open
 from app.services.command_center import status as command_status, traders as command_traders, clusters as command_clusters, opportunities as command_opportunities, live_feed as command_live_feed
@@ -43,6 +44,7 @@ supervisor = Supervisor(settings)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await asyncio.to_thread(backup_before_integrity_upgrade, settings.database_url)
     await init_db()
     await supervisor.start()
     yield

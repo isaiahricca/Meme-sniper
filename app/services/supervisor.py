@@ -17,6 +17,7 @@ from app.services.trader_intelligence import run_trader_intelligence
 from app.services.ai_ensemble import run_ai_ensemble
 from app.services.x_social import run_x_social
 from app.services.candle_sampler import run_candle_sampler
+from app.services.maintenance import run_maintenance
 from app.services.forward_test import ensure_forward_epoch, ensure_named_epoch
 
 log = logging.getLogger("supervisor")
@@ -29,6 +30,9 @@ class Supervisor:
         self.tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
+        if self.settings.live_trading_enabled:
+            from app.services.execution_lock import assert_live_trading_allowed
+            assert_live_trading_allowed()
         # Establish the verified epoch before anything capable of creating new
         # strategy/trader records starts. This prevents a startup race with legacy data.
         epoch = await ensure_v06_integrity_epoch(self.settings)
@@ -54,6 +58,7 @@ class Supervisor:
             run_ai_ensemble(self.settings, self.stop_event),
             run_x_social(self.settings, self.stop_event),
             run_candle_sampler(self.settings, self.stop_event),
+            run_maintenance(self.settings, self.stop_event),
         ]
         self.tasks = [asyncio.create_task(coro) for coro in runners]
         log.info("Started %d V0.7.4 intelligence services", len(self.tasks))

@@ -1,15 +1,15 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.config import Settings
 from app.services.market_math import pair_base as _pair_base, pair_quote as _pair_quote, pair_price as _pair_price, pair_liquidity as _pair_liquidity, choose_pair
 from app.db import SessionLocal
 from app.models import (
-    Token, TokenPairState, PairLatestPrice,
+    Token, TokenPairState, PairLatestPrice, PairPriceObservation,
     WalletSwapV06, WalletSwapMeasurementV06,
     PaperCopyTradeV06, SignalMeasurementV06, SignalPaperTradeV06,
 )
@@ -17,6 +17,7 @@ from app.models import (
 log = logging.getLogger("market")
 BASE = "https://api.dexscreener.com"
 _request_lock = asyncio.Lock()
+_snapshot_lock = asyncio.Lock()
 _last_request_at = 0.0
 
 
@@ -45,9 +46,16 @@ async def _paced_get(client: httpx.AsyncClient, settings: Settings, url: str) ->
         wait = settings.market_min_request_interval_seconds - (loop.time() - _last_request_at)
         if wait > 0:
             await asyncio.sleep(wait)
-        response = await client.get(url, timeout=12)
         _last_request_at = loop.time()
-        return response
+    response = await client.get(url, timeout=12)
+    if response.status_code == 429:
+        try:
+            retry = max(1.0, min(float(response.headers.get("retry-after", "30")), 3600.0))
+        except ValueError:
+            retry = 30.0
+        async with _request_lock:
+            _last_request_at = max(_last_request_at, loop.time() + retry)
+    return response
 
 
 
@@ -72,21 +80,11 @@ async def _fetch_exact_pairs(
     pairs = payload.get("pairs") if isinstance(payload, dict) else None
     pairs = pairs or []
 
-    # If a multi-pair request does not return all requested addresses, retry the
-    # missing ones individually. This costs more calls, but never silently treats
-    # missing data as a valid zero price.
-    returned = {p.get("pairAddress") for p in pairs if p.get("pairAddress")}
-    missing = [x for x in pair_addresses if x not in returned]
-    if missing and len(pair_addresses) > 1:
-        for address in missing:
-            try:
-                r = await _paced_get(client, settings, f"{BASE}/latest/dex/pairs/solana/{address}")
-                r.raise_for_status()
-                obj = r.json()
-                pairs.extend((obj.get("pairs") or []) if isinstance(obj, dict) else [])
-            except Exception as exc:
-                log.debug("Exact-pair fallback failed %s…: %s", address[:10], exc)
-    return pairs
+    # Retry omissions on the next scheduled refresh. Serial fallbacks used to
+    # delay every returned snapshot and falsely timestamp it after those waits.
+    requested = set(pair_addresses)
+    return [p for p in pairs if p.get("chainId") == "solana"
+            and p.get("pairAddress") in requested]
 
 
 async def _pin_pair(session, mint: str, pair: dict, now: datetime) -> None:
@@ -132,10 +130,24 @@ async def _upsert_exact_snapshot(
     address = pair.get("pairAddress")
     base = _pair_base(pair)
     price = _pair_price(pair)
-    if not address or not base or price <= 0:
+    if pair.get("chainId") != "solana" or not address or not base or price <= 0:
         return
 
     row = await session.get(PairLatestPrice, address)
+    if row is not None:
+        previous_ts = row.ts if row.ts.tzinfo else row.ts.replace(tzinfo=timezone.utc)
+        if now < previous_ts:
+            return
+    if row is not None and row.source == "dexscreener_exact_pair" and source != "dexscreener_exact_pair":
+        return
+    if row is not None and row.base_mint != base:
+        log.warning("Rejected changed base mint for pair %s", address)
+        return
+    if source == "dexscreener_exact_pair":
+        session.add(PairPriceObservation(
+            pair_address=address, base_mint=base, price_usd=price,
+            liquidity_usd=_pair_liquidity(pair) or None, ts=now, source=source,
+        ))
     if row is None:
         row = PairLatestPrice(
             pair_address=address,
@@ -183,20 +195,21 @@ async def _critical_pairs_and_missing(settings: Settings) -> tuple[list[str], li
         pairs: list[str] = []
         missing: list[str] = []
 
+        now = utcnow()
         queries = [
-            select(WalletSwapMeasurementV06.pair_address).where(
-                WalletSwapMeasurementV06.captured_at.is_(None)
-            ).limit(80),
             select(PaperCopyTradeV06.pair_address).where(
                 PaperCopyTradeV06.status.in_(["pending", "open"])
-            ).limit(80),
-            select(SignalMeasurementV06.pair_address).where(
-                SignalMeasurementV06.captured_at.is_(None)
-            ).limit(80),
+            ).distinct().limit(80),
             select(SignalPaperTradeV06.pair_address).where(
                 SignalPaperTradeV06.status.in_(["pending", "open"])
-            ).limit(80),
+            ).distinct().limit(80),
         ]
+        for model in (WalletSwapMeasurementV06, SignalMeasurementV06):
+            queries.append(select(model.pair_address).where(
+                model.captured_at.is_(None),
+                model.due_at >= now - timedelta(seconds=settings.copyability_max_capture_lag_seconds),
+                model.due_at <= now + timedelta(seconds=settings.market_critical_refresh_seconds),
+            ).group_by(model.pair_address).order_by(func.min(model.due_at)).limit(80))
         for stmt in queries:
             vals = list((await session.execute(stmt)).scalars())
             pairs.extend([v for v in vals if v])
@@ -226,7 +239,7 @@ async def _broad_pairs_and_missing(settings: Settings) -> tuple[list[str], list[
         active_states = list((await session.execute(
             select(TokenPairState)
             .where(TokenPairState.status == "active")
-            .order_by(TokenPairState.last_verified_at.desc())
+            .order_by(TokenPairState.last_verified_at.asc())
             .limit(settings.market_max_active_pairs)
         )).scalars())
         pairs: list[str] = [s.pair_address for s in active_states if s.pair_address]
@@ -252,7 +265,7 @@ async def _discover_missing(client: httpx.AsyncClient, settings: Settings, mints
             pair = choose_pair(mint, pairs, settings.pair_discovery_min_liquidity_usd)
             if pair:
                 now = utcnow()  # timestamp after response, never before request
-                async with SessionLocal() as session:
+                async with _snapshot_lock, SessionLocal() as session:
                     await _pin_pair(session, mint, pair, now)
                     await session.commit()
                 found += 1
@@ -273,7 +286,7 @@ async def _refresh_exact(client: httpx.AsyncClient, settings: Settings, pair_add
         try:
             pairs = await _fetch_exact_pairs(client, settings, batch)
             fetched_at = utcnow()
-            async with SessionLocal() as session:
+            async with _snapshot_lock, SessionLocal() as session:
                 for pair in pairs:
                     await _upsert_exact_snapshot(
                         session, pair, fetched_at, source="dexscreener_exact_pair"
@@ -303,38 +316,38 @@ async def run_market_data(settings: Settings, stop: asyncio.Event) -> None:
 
     log.info("Verified pair market service active")
     async with httpx.AsyncClient(headers={"User-Agent": "MemeSniperV06/0.6"}) as client:
-        loop = asyncio.get_running_loop()
-        next_critical = 0.0
-        next_broad = 0.0
-        next_discovery = 0.0
+        async def cycle(kind, interval):
+            while not stop.is_set():
+                started = asyncio.get_running_loop().time()
+                try:
+                    critical, missing = await _critical_pairs_and_missing(settings)
+                    if kind == "critical":
+                        await _refresh_exact(client, settings, critical)
+                    elif kind == "broad":
+                        broad, _ = await _broad_pairs_and_missing(settings)
+                        await _refresh_exact(client, settings, [p for p in broad if p not in set(critical)])
+                    else:
+                        _, broad_missing = await _broad_pairs_and_missing(settings)
+                        await _discover_missing(client, settings, list(dict.fromkeys(missing + broad_missing)))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Market %s cycle failed", kind)
+                delay = max(0.5, interval - (asyncio.get_running_loop().time() - started))
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
 
-        while not stop.is_set():
-            now_mono = loop.time()
-            try:
-                critical_pairs, critical_missing = await _critical_pairs_and_missing(settings)
-
-                if now_mono >= next_critical:
-                    await _refresh_exact(client, settings, critical_pairs)
-                    next_critical = now_mono + max(settings.market_critical_refresh_seconds, 1.0)
-
-                if now_mono >= next_broad:
-                    broad_pairs, _ = await _broad_pairs_and_missing(settings)
-                    ordered = list(dict.fromkeys(critical_pairs + broad_pairs))[:settings.market_max_active_pairs]
-                    await _refresh_exact(client, settings, ordered)
-                    next_broad = now_mono + max(settings.market_broad_refresh_seconds, 2.0)
-
-                if now_mono >= next_discovery:
-                    _, broad_missing = await _broad_pairs_and_missing(settings)
-                    missing = list(dict.fromkeys(critical_missing + broad_missing))[:20]
-                    await _discover_missing(client, settings, missing)
-                    next_discovery = now_mono + max(settings.market_discovery_refresh_seconds, 2.0)
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.exception("Verified market service error: %s", exc)
-
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=0.5)
-            except asyncio.TimeoutError:
-                pass
+        # Separate bounded workers; all requests still share the rate limiter.
+        tasks = [asyncio.create_task(cycle(kind, interval)) for kind, interval in (
+            ("critical", max(settings.market_critical_refresh_seconds, 1.0)),
+            ("broad", max(settings.market_broad_refresh_seconds, 2.0)),
+            ("discovery", max(settings.market_discovery_refresh_seconds, 2.0)),
+        )]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)

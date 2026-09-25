@@ -9,13 +9,26 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.db import SessionLocal
-from app.models import Token, TrackedWallet, WalletSwapV06
+from app.models import Token, TrackedWallet, WalletSwapV06, SystemState
 from app.services.event_store import store_event, ensure_wallets
 from app.services.wallet_parser import parse_wallet_swap, same_buy_episode
 
 log = logging.getLogger("helius")
 _rpc_lock = asyncio.Lock()
 _last_rpc_at = 0.0
+
+
+async def _save_health(queue, counters, connection):
+    payload = dict(counters, queue_depth=queue.qsize(), queue_capacity=queue.maxsize,
+                   connection=connection, updated_at=datetime.now(timezone.utc).isoformat(),
+                   counter_scope="current process")
+    async with SessionLocal() as session:
+        row = await session.get(SystemState, "helius_stream_health")
+        if row is None:
+            row = SystemState(key="helius_stream_health", value="{}")
+            session.add(row)
+        row.value = json.dumps(payload)
+        await session.commit()
 
 
 def _signature_from_standard(payload: dict) -> str | None:
@@ -112,7 +125,7 @@ async def _record_wallet_swap(
         except Exception:
             payload = {}
     if not payload.get("result"):
-        return
+        raise RuntimeError("confirmed_transaction_unavailable_after_retries")
 
     parsed, reason = parse_wallet_swap(payload, wallet)
     async with SessionLocal() as session:
@@ -213,6 +226,7 @@ async def _tx_worker(
     settings: Settings,
     client: httpx.AsyncClient,
     stop: asyncio.Event,
+    counters: dict,
 ) -> None:
     while not stop.is_set():
         try:
@@ -220,10 +234,13 @@ async def _tx_worker(
         except asyncio.TimeoutError:
             continue
         try:
+            counters["last_queue_lag_seconds"] = (datetime.now(timezone.utc) - detected_at).total_seconds()
             await _record_wallet_swap(settings, client, wallet, signature, detected_at)
+            counters["processed"] += 1
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            counters["failed"] += 1
             log.warning(
                 "Helius tx worker %d failed %s…: %s",
                 worker_id, signature[:10], _safe_error(exc, settings)
@@ -291,10 +308,12 @@ async def run_helius(settings: Settings, stop: asyncio.Event) -> None:
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=max(settings.helius_tx_queue_size, 10))
     backoff = 1
+    counters = {"received": 0, "processed": 0, "failed": 0, "dropped": 0,
+                "reconnects": 0, "last_queue_lag_seconds": 0.0}
 
     async with httpx.AsyncClient() as client:
         workers = [
-            asyncio.create_task(_tx_worker(i + 1, queue, settings, client, stop))
+            asyncio.create_task(_tx_worker(i + 1, queue, settings, client, stop, counters))
             for i in range(max(settings.helius_tx_worker_count, 1))
         ]
         try:
@@ -331,6 +350,10 @@ async def run_helius(settings: Settings, stop: asyncio.Event) -> None:
                                 unsubscribe_ids.update(range(before, next_id))
                                 unsubscribe_ids.difference_update(pending_subscribe.keys())
                                 last_sync = loop.time()
+                                try:
+                                    await _save_health(queue, counters, "connected")
+                                except Exception:
+                                    log.warning("Could not persist Helius health")
 
                             try:
                                 raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
@@ -361,10 +384,12 @@ async def run_helius(settings: Settings, stop: asyncio.Event) -> None:
                             wallet = subscription_to_wallet.get(sub_id)
                             signature = _signature_from_standard(payload)
                             if wallet and signature:
+                                counters["received"] += 1
                                 item = (wallet, signature, datetime.now(timezone.utc))
                                 try:
                                     queue.put_nowait(item)
                                 except asyncio.QueueFull:
+                                    counters["dropped"] += 1
                                     # Fail visibly rather than exhausting memory. A dropped
                                     # transaction is an integrity loss, so log it loudly.
                                     log.error(
@@ -375,6 +400,11 @@ async def run_helius(settings: Settings, stop: asyncio.Event) -> None:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    counters["reconnects"] += 1
+                    try:
+                        await _save_health(queue, counters, "reconnecting")
+                    except Exception:
+                        log.warning("Could not persist Helius health")
                     log.warning(
                         "Helius stream error: %s; reconnecting in %ss",
                         _safe_error(exc, settings), backoff

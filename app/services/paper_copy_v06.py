@@ -54,6 +54,9 @@ async def _seed_new(settings: Settings) -> int:
                 WalletSwapV06.tracked_at_detection.is_(True),
                 WalletSwapV06.ts >= epoch,
                 WalletSwapV06.pair_address.is_not(None),
+                ~select(PaperCopyTradeV06.id).where(
+                    PaperCopyTradeV06.swap_id == WalletSwapV06.id
+                ).exists(),
             )
             .order_by(WalletSwapV06.ts.asc())
             .limit(300)
@@ -170,7 +173,10 @@ async def _enter_due(settings: Settings) -> tuple[int, int]:
                 elif now > deadline:
                     row.status = "rejected"; row.integrity_status = "rejected"; row.reject_reason = risk_reason; rejected += 1
                 continue
-            if await _active_count(session) >= settings.paper_copy_max_open_trades:
+            open_ids = (await session.execute(select(PaperCopyTradeV06.id).where(
+                PaperCopyTradeV06.status == "open"
+            ))).scalars().all()
+            if len(open_ids) >= settings.paper_copy_max_open_trades:
                 row.status = "rejected"
                 row.integrity_status = "rejected"
                 row.reject_reason = "max_open_trades"
@@ -189,7 +195,7 @@ async def _enter_due(settings: Settings) -> tuple[int, int]:
             snap_ts = aware(latest.ts)
             valid = bool(
                 snap_ts is not None
-                and eligible <= snap_ts <= deadline
+                and eligible <= snap_ts <= min(deadline, now)
                 and latest.source == "dexscreener_exact_pair"
                 and latest.base_mint == row.token_mint
                 and latest.price_usd > 0
@@ -309,7 +315,7 @@ async def _manage_open(settings: Settings) -> tuple[int, int]:
                 row.exit_reason = "missed_exit_window_or_downtime"
                 invalid += 1
                 continue
-            if (now - snap_ts).total_seconds() > settings.market_max_price_age_seconds:
+            if not 0 <= (now - snap_ts).total_seconds() <= settings.market_max_price_age_seconds:
                 if exit_due and now > exit_due + timedelta(seconds=settings.paper_copy_exit_price_grace_seconds):
                     row.status = "invalid"
                     row.integrity_status = "invalid"

@@ -64,7 +64,6 @@ async def _sample(settings: Settings) -> int:
         return 0
     now = datetime.now(timezone.utc)
     now_db = utc_naive(now)
-    bucket = minute_bucket(now)
     count = 0
     async with SessionLocal() as session:
         states = list((await session.execute(
@@ -75,15 +74,18 @@ async def _sample(settings: Settings) -> int:
         )).scalars())
         for state in states:
             latest = await session.get(PairLatestPrice, state.pair_address)
-            if latest is None or latest.price_usd <= 0:
+            if (latest is None or latest.price_usd <= 0 or latest.base_mint != state.token_mint
+                    or latest.source != "dexscreener_exact_pair"):
                 continue
             ts = utc_naive(latest.ts)
-            if ts is None or (now_db - ts).total_seconds() > max(settings.market_max_price_age_seconds * 2, 12):
+            if ts is None or not 0 <= (now_db - ts).total_seconds() <= settings.market_max_price_age_seconds:
                 continue
+            bucket = minute_bucket(ts)
             row = (await session.execute(
                 select(PriceCandleV074)
                 .where(
                     PriceCandleV074.token_mint == state.token_mint,
+                    PriceCandleV074.pair_address == state.pair_address,
                     PriceCandleV074.bucket_at == bucket,
                 )
                 .order_by(PriceCandleV074.id.desc())
@@ -97,14 +99,17 @@ async def _sample(settings: Settings) -> int:
                     bucket_at=bucket,
                     open=px, high=px, low=px, close=px,
                     liquidity_usd=latest.liquidity_usd,
-                    samples=1,
+                    samples=1, last_observed_at=ts,
                 ))
             else:
+                if row.last_observed_at is not None and ts <= utc_naive(row.last_observed_at):
+                    continue
                 row.high = max(float(row.high), px)
                 row.low = min(float(row.low), px)
                 row.close = px
                 row.liquidity_usd = latest.liquidity_usd
                 row.samples = int(row.samples or 0) + 1
+                row.last_observed_at = ts
             count += 1
 
         cutoff = now_db - timedelta(minutes=max(settings.candle_history_minutes, 30))

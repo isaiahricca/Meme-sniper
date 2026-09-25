@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+import math
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -105,6 +106,22 @@ def _extract_json(text: str) -> dict:
 
 
 def _normalize(obj: dict) -> dict:
+    # Invalid evidence is a provider failure, never an invented BUY confidence.
+    if set(obj) != set(DECISION_SCHEMA["required"]):
+        raise ValueError("model decision has missing or unexpected fields")
+    for key in ("confidence", "expected_edge_pct", "suggested_stop_loss_pct",
+                "suggested_take_profit_pct", "suggested_max_hold_seconds"):
+        value = obj[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"invalid numeric decision field: {key}")
+    if obj["verdict"] not in {"BUY", "PASS"} or not 0 <= obj["confidence"] <= 100:
+        raise ValueError("invalid verdict or confidence")
+    if not isinstance(obj["thesis"], str) or not isinstance(obj["risks"], list) or not all(isinstance(x, str) for x in obj["risks"]):
+        raise ValueError("invalid thesis or risks")
+    if any(obj[key] <= 0 for key in ("suggested_stop_loss_pct", "suggested_take_profit_pct", "suggested_max_hold_seconds")):
+        raise ValueError("risk parameters must be positive")
+    if not isinstance(obj["suggested_max_hold_seconds"], int):
+        raise ValueError("holding seconds must be an integer")
     verdict = str(obj.get("verdict") or "PASS").upper().strip()
     if verdict not in {"BUY", "PASS"}:
         verdict = "PASS"
@@ -219,7 +236,23 @@ async def _ask_claude(http: httpx.AsyncClient, settings: Settings, packet: dict)
             # not disable the trading committee. Keep the failure visible in the
             # research row, but let the signal lane use the healthy OpenAI model
             # under its existing confidence + after-cost edge requirements.
-            return f"http_{response.status_code}", {"error": response.text[:300]}, latency
+            try:
+                body = response.json()
+                error = body.get("error") or {}
+                detail = {
+                    "error_code": str(error.get("type") or "unknown")[:80],
+                    "error": str(error.get("message") or "")[:500],
+                    "request_id": str(body.get("request_id") or response.headers.get("request-id") or "")[:120],
+                }
+            except (ValueError, AttributeError):
+                detail = {"error_code": "unstructured_error", "error": "Provider returned a non-JSON error"}
+            for key in detail:
+                detail[key] = detail[key].replace(settings.anthropic_api_key, "[REDACTED]")
+            log.warning("Claude request failed: status=%s type=%s request_id=%s message=%s",
+                        response.status_code, detail.get("error_code"), detail.get("request_id"), detail.get("error"))
+            return f"http_{response.status_code}", detail, latency
+        if response.json().get("stop_reason") != "end_turn":
+            return "incomplete", {"error": "Claude response did not finish normally"}, latency
         obj = _normalize(_extract_json(_claude_text(response.json())))
         return "ok", obj, latency
     except Exception as exc:
@@ -247,12 +280,13 @@ async def _packet_for(session, signal: Signal, settings: Settings) -> tuple[dict
     if token is None or state is None or state.status != "active":
         return None, None, True
     latest = await session.get(PairLatestPrice, state.pair_address)
-    if latest is None or latest.price_usd <= 0 or not latest.liquidity_usd:
+    if (latest is None or latest.price_usd <= 0 or not latest.liquidity_usd
+            or latest.source != "dexscreener_exact_pair" or latest.base_mint != signal.token_mint):
         return None, None, True
 
     now = datetime.now(timezone.utc)
     latest_ts = aware(latest.ts)
-    if latest_ts is None or (now - latest_ts).total_seconds() > max(settings.market_max_price_age_seconds * 2, 12):
+    if latest_ts is None or not 0 <= (now - latest_ts).total_seconds() <= settings.market_max_price_age_seconds:
         return None, None, True
 
     risk = await session.get(TokenRiskV072, signal.token_mint)
@@ -315,6 +349,7 @@ async def _packet_for(session, signal: Signal, settings: Settings) -> tuple[dict
             "risk_penalty": signal.risk_penalty,
         },
         "market": {
+            "pair_address": state.pair_address,
             "mint": signal.token_mint,
             "symbol": token.symbol,
             "price_usd": latest.price_usd,

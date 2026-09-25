@@ -1,4 +1,5 @@
 from app.services.smart_money import clamp
+import math
 
 
 def return_component(value: float | None) -> float:
@@ -41,6 +42,8 @@ def combine_score(
 
 
 def classify_return(raw_return_pct: float, extreme_threshold_pct: float) -> tuple[bool, str]:
+    if not math.isfinite(raw_return_pct):
+        return False, "nonfinite_return"
     if abs(raw_return_pct) > extreme_threshold_pct:
         return False, "return_exceeds_integrity_threshold"
     return True, "valid"

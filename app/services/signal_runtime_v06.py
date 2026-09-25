@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from app.models import (
 from app.services.signal_engine import SignalInputs, score_signal
 from app.services.paper import simulate_buy, simulate_sell
 from app.services.rug_shield import risk_gate
+from app.services.measurement_prices import first_observation
 
 log = logging.getLogger("signal_v06")
 
@@ -56,6 +58,7 @@ async def _fresh_pair(session, mint: str, settings: Settings):
         or latest.source != "dexscreener_exact_pair"
         or latest.base_mint != mint
         or latest.price_usd <= 0
+        or snap > now
         or (now - snap).total_seconds() > settings.market_max_price_age_seconds
     ):
         return None
@@ -409,7 +412,7 @@ async def _enter_pending(settings: Settings) -> tuple[int, int]:
                 continue
             snap = aware(latest.ts)
             valid = bool(
-                snap is not None and eligible <= snap <= deadline
+                snap is not None and eligible <= snap <= min(deadline, now)
                 and latest.source == "dexscreener_exact_pair"
                 and latest.base_mint == row.token_mint
                 and latest.price_usd > 0
@@ -461,7 +464,10 @@ async def _manage_open(settings: Settings) -> tuple[int, int]:
                 continue
             if exit_due and snap > exit_due + timedelta(seconds=settings.paper_signal_exit_price_grace_seconds):
                 row.status = "invalid"; row.integrity_status = "invalid"; row.closed_at = snap; row.exit_reason = "missed_exit_window_or_downtime"; invalid += 1; continue
-            if (now - snap).total_seconds() > settings.market_max_price_age_seconds:
+            if not 0 <= (now - snap).total_seconds() <= settings.market_max_price_age_seconds:
+                if exit_due and now > exit_due + timedelta(seconds=settings.paper_signal_exit_price_grace_seconds):
+                    row.status = "invalid"; row.integrity_status = "invalid"; row.closed_at = now
+                    row.exit_reason = "stale_exact_pair_price_after_max_hold"; invalid += 1
                 continue
             mark = ((latest.price_usd / row.entry_fill_price) - 1.0) * 100.0
             if abs(mark) > settings.copyability_extreme_return_pct:
@@ -519,13 +525,13 @@ async def _capture_measurements(settings: Settings) -> tuple[int, int]:
         for row in rows:
             due = aware(row.due_at)
             if due is None or due > now: continue
-            latest = await session.get(PairLatestPrice, row.pair_address)
+            latest = await first_observation(session, row.pair_address, due, now)
             if latest is None:
                 if now > due + timedelta(seconds=settings.copyability_capture_grace_seconds):
                     row.captured_at = now; row.integrity_status = "invalid"; row.invalid_reason = "exact_pair_price_unavailable"; invalid += 1
                 continue
             snap = aware(latest.ts)
-            if snap is None or snap < due:
+            if snap is None or snap < due or snap > now:
                 if now > due + timedelta(seconds=settings.copyability_capture_grace_seconds):
                     row.captured_at = now; row.integrity_status = "invalid"; row.invalid_reason = "no_post_due_snapshot"; invalid += 1
                 continue
@@ -537,7 +543,7 @@ async def _capture_measurements(settings: Settings) -> tuple[int, int]:
             if row.baseline_price <= 0 or latest.price_usd <= 0: row.integrity_status = "invalid"; row.invalid_reason = "nonpositive_price"; invalid += 1; continue
             raw = ((latest.price_usd / row.baseline_price) - 1.0) * 100.0
             row.raw_return_pct = raw
-            if abs(raw) > settings.copyability_extreme_return_pct:
+            if not math.isfinite(raw) or abs(raw) > settings.copyability_extreme_return_pct:
                 row.integrity_status = "extreme_excluded"; row.invalid_reason = "return_exceeds_integrity_threshold"; row.valid_for_score = False; invalid += 1
             else:
                 row.integrity_status = "valid"; row.valid_for_score = True; captured += 1
